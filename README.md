@@ -37,31 +37,34 @@ Therefore, an anomaly detection-based novelty assessment method has emerged to e
 
 ### Pipeline
 
-The project follows a sequential data science pipeline. Each step is a Typer CLI app that can be run independently:
+The project follows a sequential data science pipeline. Each step is a Typer CLI app that can be run independently using `uv run`. For the data pipeline, use the `make` utility.
 
-1. **Process raw data**
+1. **Process raw data (Integrated Data Pipeline)**
+   The integrated data pipeline will pull incremental arXiv text data and generate semantic SentenceTransformer numerical vectors natively:
    ```bash
-   python patent/dataset.py --input-path data/raw/dataset.csv --output-path data/processed/dataset.csv
+   # Make data starting from a specific date natively through Make:
+   make data FROM=2026-03-01 TO=2026-03-15
    ```
+   *(For full details, see the architecture in [docs/docs/data-pipeline.md](docs/docs/data-pipeline.md)).*
 
 2. **Generate features**
    ```bash
-   python patent/features.py --input-path data/processed/dataset.csv --output-path data/processed/features.csv
+   uv run python patent/features.py --input-path data/processed/processed_dataset.pkl --output-path data/processed/features.csv
    ```
 
 3. **Train model**
    ```bash
-   python patent/modeling/train.py --features-path data/processed/features.csv --labels-path data/processed/labels.csv --model-path models/model.pkl
+   uv run python patent/modeling/train.py --features-path data/processed/features.csv --labels-path data/processed/labels.csv --model-path models/model.pkl
    ```
 
 4. **Run predictions**
    ```bash
-   python patent/modeling/predict.py --features-path data/processed/test_features.csv --model-path models/model.pkl --predictions-path data/processed/test_predictions.csv
+   uv run python patent/modeling/predict.py --features-path data/processed/test_features.csv --model-path models/model.pkl --predictions-path data/processed/test_predictions.csv
    ```
 
 5. **Generate plots**
    ```bash
-   python patent/plots.py --input-path data/processed/dataset.csv --output-path reports/figures/plot.png
+   uv run python patent/plots.py --input-path data/processed/processed_dataset.pkl --output-path reports/figures/plot.png
    ```
 
  Use `--help` on any command to see available options.
@@ -71,7 +74,7 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
 | Command                  | Description                                |
 | ------------------------ | ------------------------------------------ |
 | `make requirements`      | Install/sync Python dependencies with uv   |
-| `make data`              | Run the dataset processing pipeline        |
+| `make data FROM= YYYY-MM-DD [TO= YYYY-MM-DD]` | Run data ingestion and preprocessing |
 | `make test`              | Run tests with pytest                      |
 | `make lint`              | Check code style with ruff                 |
 | `make format`            | Auto-format source code with ruff          |

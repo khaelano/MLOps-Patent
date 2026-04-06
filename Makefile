@@ -62,10 +62,14 @@ create_environment:
 #################################################################################
 
 
-## Make dataset
+## Make dataset (Usage: make data FROM=YYYY-MM-DD [TO=YYYY-MM-DD])
 .PHONY: data
 data: requirements
-	$(PYTHON_INTERPRETER) patent/dataset.py
+ifndef FROM
+	$(error FROM argument is required. Usage: make data FROM=YYYY-MM-DD [TO=YYYY-MM-DD])
+endif
+	uv run $(PYTHON_INTERPRETER) patent/dataset/data_ingestion.py update --from-date $(FROM) $(if $(TO),--to-date $(TO),) --output-dir data/raw
+	uv run $(PYTHON_INTERPRETER) patent/dataset/preprocess.py --kaggle-json data/raw/arxiv-metadata-oai-snapshot.json --xml-dir data/raw --output-path data/processed/processed_dataset.pkl
 
 
 #################################################################################
