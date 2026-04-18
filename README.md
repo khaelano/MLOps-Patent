@@ -42,8 +42,13 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
 1. **Process raw data (Integrated Data Pipeline)**
    The integrated data pipeline will pull incremental arXiv text data and generate semantic SentenceTransformer numerical vectors natively:
    ```bash
-   # Make data starting from a specific date natively through Make:
-   make data FROM=2026-03-01 TO=2026-03-15
+   # Make update data starting from a specific date natively through Make:
+   make data-update FROM=2026-03-01 TO=2026-03-15
+
+   # Preprocess sequentially:
+   make data-reserialize INPUT=data/raw/updates/
+   make data-clean INPUT=data/interim/serialized/updates.parquet
+   make data-embed INPUT=data/interim/cleaned/updates.parquet
    ```
    *(For full details, see the architecture in [docs/docs/data-pipeline.md](docs/docs/data-pipeline.md)).*
 
@@ -74,7 +79,10 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
 | Command                  | Description                                |
 | ------------------------ | ------------------------------------------ |
 | `make requirements`      | Install/sync Python dependencies with uv   |
-| `make data FROM= YYYY-MM-DD [TO= YYYY-MM-DD]` | Run data ingestion and preprocessing |
+| `make data-update FROM=YYYY-MM-DD` | Run incremental data ingestion |
+| `make data-reserialize INPUT=<path>`| Run XML/JSON DataFrame conversion |
+| `make data-clean INPUT=<path>`| Run text preprocessing logic |
+| `make data-embed INPUT=<path>`| Run sequence embedding logic |
 | `make test`              | Run tests with pytest                      |
 | `make lint`              | Check code style with ruff                 |
 | `make format`            | Auto-format source code with ruff          |

@@ -62,14 +62,33 @@ create_environment:
 #################################################################################
 
 
-## Make dataset (Usage: make data FROM=YYYY-MM-DD [TO=YYYY-MM-DD])
-.PHONY: data
-data: requirements
-ifndef FROM
-	$(error FROM argument is required. Usage: make data FROM=YYYY-MM-DD [TO=YYYY-MM-DD])
-endif
-	uv run $(PYTHON_INTERPRETER) patent/dataset/data_ingestion.py update --from-date $(FROM) $(if $(TO),--to-date $(TO),) --output-dir data/raw
-	uv run $(PYTHON_INTERPRETER) patent/dataset/preprocess.py --kaggle-json data/raw/arxiv-metadata-oai-snapshot.json --xml-dir data/raw --output-path data/processed/processed_dataset.pkl
+## Initialize raw dataset from Kaggle snapshot (run once)
+.PHONY: data-init
+data-init: requirements
+	uv run $(PYTHON_INTERPRETER) patent/cli.py data init
+
+## Update raw dataset incrementally via OAI-PMH
+.PHONY: data-update
+data-update: requirements
+	uv run $(PYTHON_INTERPRETER) patent/cli.py data update $(if $(FROM),--from-date $(FROM)) $(if $(TO),--to-date $(TO))
+
+## Reserialize XML/JSON data to Parquet
+.PHONY: data-reserialize
+data-reserialize: requirements
+	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make data-reserialize INPUT=<path>"; exit 1; fi
+	uv run $(PYTHON_INTERPRETER) patent/cli.py data reserialize $(INPUT) $(if $(IS_JSON),--json)
+
+## Clean reserialized data
+.PHONY: data-clean
+data-clean: requirements
+	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make data-clean INPUT=<path>"; exit 1; fi
+	uv run $(PYTHON_INTERPRETER) patent/cli.py data clean $(INPUT)
+
+## Embed cleaned data
+.PHONY: data-embed
+data-embed: requirements
+	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make data-embed INPUT=<path>"; exit 1; fi
+	uv run $(PYTHON_INTERPRETER) patent/cli.py data embed $(INPUT)
 
 
 #################################################################################

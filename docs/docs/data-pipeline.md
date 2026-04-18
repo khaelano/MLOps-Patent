@@ -9,30 +9,30 @@ The pipeline consists of two primary modules: **Data Ingestion** and **Data Prep
 ```mermaid
 graph TD
     subgraph Data Ingestion
-        A[Kaggle API] -->|initial-fetch| C(arxiv-metadata-oai-snapshot.json)
+        A[Kaggle API] -->|init| C(arxiv-metadata-oai-snapshot.json)
         B[arXiv OAI-PMH API] -->|update| D(incremental updates .xml)
     end
 
     subgraph Data Preprocessing
-        C --> E[Data Consolidation & Parsing]
-        D --> E
-        E --> F[Deduplicate by update_date]
-        F --> G[Clean Text: Strip LaTeX, whitespace]
-        G --> H[Embed Titles: SentenceTransformers MiniLM]
-        H --> I[(Processed DataFrame .pkl)]
+        C -->|reserialize| E[(Serialized Parquet)]
+        D -->|reserialize| E
+        E -->|clean| F[Clean Text: Deduplicate, Strip LaTeX, Whitespace]
+        F --> G[(Cleaned Parquet)]
+        G -->|embed| H[Embed Titles: SentenceTransformers MiniLM]
+        H --> I[(Processed Parquet)]
     end
 ```
 
 ## 1. Data Ingestion
 
-The data ingestion script (`patent/dataset/data_ingestion.py`) handles the acquisition of raw data. It supports bootstrapping a large database via Kaggle and maintaining updating the data sequentially using the live arXiv API.
+The CLI (`patent/cli.py data`) handles the acquisition of raw data. It supports bootstrapping a large database via Kaggle and maintaining updating the data sequentially using the live arXiv API.
 
 ### Initial Fetch (Kaggle Integration)
 To quickly bootstrap historical data without aggressively hitting the arXiv API, the pipeline can download the Kaggle `arxiv-metadata-oai-snapshot` dataset.
 
 ```bash
 # Uses ~/.kaggle/kaggle.json credentials
-uv run python patent/dataset/data_ingestion.py initial-fetch --output-dir data/raw
+uv run python patent/cli.py data init
 ```
 
 ### Incremental Updates (OAI-PMH API)
@@ -40,39 +40,34 @@ To fetch new papers or retrieve specific date ranges incrementally, use the `upd
 
 ```bash
 # Fetch data from March 1 to March 15 and output to the raw directory
-uv run python patent/dataset/data_ingestion.py update \
+uv run python patent/cli.py data update \
     --from-date 2026-03-01 \
     --to-date 2026-03-15 \
-    --output-dir data/raw
+    --output-path data/raw/updates
 ```
 
 ## 2. Data Preprocessing
 
-The preprocessing script (`patent/dataset/preprocess.py`) transforms the JSON and XML data into clean, embeddable feature vectors ready for the machine learning models.
+The preprocessing pipeline (`patent/cli.py data reserialize | clean | embed`) transforms the JSON and XML data into clean, embeddable feature vectors ready for the machine learning models.
 
 ### How it works:
-1. **Parsing:** Reads either the Kaggle JSON, a directory of XML updates, or a single XML update file.
-2. **Deduplication:** Sorts all entries by `update_date` and drops duplicates based on the paper's ID, preserving only the most recent version.
-3. **Text Cleaning:** Strips inline LaTeX strings (e.g., `$\alpha = 1$`), strips excessive whitespaces, and applies lowercasing. Papers with empty titles after cleaning are dropped.
-4. **Vector Embedding:** Passes the titles through the local HuggingFace `SentenceTransformers` model (`all-MiniLM-L6-v2`) to produce standard 384-dimensional numeric feature embeddings.
-5. **Storage:** Saves the augmented Pandas DataFrame into a pickled (`.pkl`) format for efficient downstream loading.
+1. **Reserializing (`data reserialize`)**: Reads either the Kaggle JSON, a directory of XML updates, or a single XML update file, and parses it into a Parquet format stored in `data/interim/serialized`.
+2. **Cleaning (`data clean`)**: Reads the reserialized artifact, drops duplicates based on the paper's ID, strips inline LaTeX strings (e.g., `$\alpha = 1$`), strips excessive whitespaces, and applies lowercasing. Output goes to `data/interim/cleaned`.
+3. **Embedding (`data embed`)**: Reads the clean parquet in chunks and passes the titles through the local HuggingFace `SentenceTransformers` model (`all-MiniLM-L6-v2`) to produce standard 384-dimensional numeric feature embeddings.
+4. **Storage:** Saves the embedded dataset into a pickled and partitioned Parquet format in `data/processed` for efficient downstream loading.
 
-### Running Preprocessing (Batch Directory)
-Run over an entire directory of XML files (best for bulk initialization):
-
-```bash
-uv run python patent/dataset/preprocess.py \
-    --xml-dir data/raw \
-    --output-path data/processed/encoded_dataset.pkl
-```
-
-### Running Preprocessing (Single File / Airflow Simulation)
-Run over a discrete XML file (best for scheduled sequential orchestration):
+### Running Preprocessing (End-to-End simulation)
+Run sequentially over new updates:
 
 ```bash
-uv run python patent/dataset/preprocess.py \
-    --xml-file data/raw/arxiv_updates_2026-03-01_to_2026-03-03_073527.xml \
-    --output-path data/processed/arxiv_updates_2026-03-01.pkl
+# 1. Parse into Parquet DataFrame
+uv run python patent/cli.py data reserialize data/raw/updates --output-path data/interim/serialized/updates.parquet
+
+# 2. Clean Text Data
+uv run python patent/cli.py data clean data/interim/serialized/updates.parquet --output-path data/interim/cleaned/updates.parquet
+
+# 3. Vectorize Labels
+uv run python patent/cli.py data embed data/interim/cleaned/updates.parquet --output-path data/processed/updates.parquet
 ```
 
 
