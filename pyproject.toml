@@ -17,6 +17,7 @@ classifiers = [
 ]
 dependencies = [
     "ipython",
+    "joblib>=1.5.3",
     "jupyterlab",
     "kaggle>=1.7.4.5",
     "loguru",
@@ -24,6 +25,7 @@ dependencies = [
     "mkdocs",
     "notebook",
     "numpy",
+    "optuna>=4.8.0",
     "pandas",
     "pip",
     "pyarrow>=23.0.1",
@@ -50,4 +52,9 @@ extend-select = ["I"]  # Add import sorting
 [tool.ruff.lint.isort]
 known-first-party = ["patent"]
 force-sort-within-sections = true
+
+[dependency-groups]
+dev = [
+    "memory-profiler>=0.61.0",
+]
 

@@ -1,6 +1,8 @@
 from pathlib import Path
 
+import joblib
 from loguru import logger
+from sklearn.decomposition import IncrementalPCA
 from tqdm import tqdm
 import typer
 
@@ -24,6 +26,14 @@ def main(
             logger.info("Something happened for iteration 5.")
     logger.success("Inference complete.")
     # -----------------------------------------
+
+
+def load_pca_model(model_path: str = "models/pca_model.joblib") -> IncrementalPCA:
+    """
+    Load a trained PCA model.
+    """
+    logger.info(f"Loading PCA model from {model_path}")
+    return joblib.load(model_path)
 
 
 if __name__ == "__main__":

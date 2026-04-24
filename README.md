@@ -50,29 +50,21 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
    make data-clean INPUT=data/interim/serialized/updates.parquet
    make data-embed INPUT=data/interim/cleaned/updates.parquet
    ```
-   *(For full details, see the architecture in [docs/docs/data-pipeline.md](docs/docs/data-pipeline.md)).*
+   *(For full details, see the architecture in [docs/data-pipeline.md](docs/docs/data-pipeline.md)).*
 
-2. **Generate features**
+2. **Reduce dimensions (Optional)**
+   Dramatically shrink the embedding vectors from 384d down to a computationally manageable size natively via iterative processing:
    ```bash
-   uv run python patent/features.py --input-path data/processed/processed_dataset.pkl --output-path data/processed/features.csv
+   make data-reduce INPUT=data/processed/updates.parquet
    ```
 
-3. **Train model**
+3. **Train and Tune Model (Isolation Forest)**
+   Dynamically spin up an Optuna study over sampled vectors and track metrics for best configurations. The trained artifacts and optimal scores will automatically export to the `models/run_<timestamp>` directory.
    ```bash
-   uv run python patent/modeling/train.py --features-path data/processed/features.csv --labels-path data/processed/labels.csv --model-path models/model.pkl
+   make model-tune INPUT=data/processed/updates.parquet
    ```
 
-4. **Run predictions**
-   ```bash
-   uv run python patent/modeling/predict.py --features-path data/processed/test_features.csv --model-path models/model.pkl --predictions-path data/processed/test_predictions.csv
-   ```
-
-5. **Generate plots**
-   ```bash
-   uv run python patent/plots.py --input-path data/processed/processed_dataset.pkl --output-path reports/figures/plot.png
-   ```
-
- Use `--help` on any command to see available options.
+ Use `--help` on any Typer CLI command (`uv run patent/cli.py <command> --help`) to see advanced invocation options.
 
 ### Make Commands
 
@@ -83,6 +75,8 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
 | `make data-reserialize INPUT=<path>`| Run XML/JSON DataFrame conversion |
 | `make data-clean INPUT=<path>`| Run text preprocessing logic |
 | `make data-embed INPUT=<path>`| Run sequence embedding logic |
+| `make data-reduce INPUT=<path>`| Run dimensionality reduction via PCA |
+| `make model-tune INPUT=<path>` | Hyperparameter tune & train Isolation Forest |
 | `make test`              | Run tests with pytest                      |
 | `make lint`              | Check code style with ruff                 |
 | `make format`            | Auto-format source code with ruff          |

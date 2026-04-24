@@ -90,6 +90,18 @@ data-embed: requirements
 	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make data-embed INPUT=<path>"; exit 1; fi
 	uv run $(PYTHON_INTERPRETER) patent/cli.py data embed $(INPUT)
 
+## Reduce embedding dimensionality via Temporal Incremental PCA
+.PHONY: data-reduce
+data-reduce: requirements
+	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make data-reduce INPUT=<path>"; exit 1; fi
+	uv run $(PYTHON_INTERPRETER) patent/cli.py data reduce $(INPUT)
+
+## Tune and train the novelty Isolation Forest Model via Optuna
+.PHONY: model-tune
+model-tune: requirements
+	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make model-tune INPUT=<path>"; exit 1; fi
+	uv run $(PYTHON_INTERPRETER) patent/cli.py train tune $(INPUT)
+
 
 #################################################################################
 # Self Documenting Commands                                                     #
