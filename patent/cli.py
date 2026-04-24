@@ -22,7 +22,10 @@ app.add_typer(data_app, name="data")
 @data_app.command("init")
 def init_data(
     output_path: Path = typer.Option(
-        RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json", "--output-path", "-o", help="File path for metadata storage"
+        RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json",
+        "--output-path",
+        "-o",
+        help="File path for metadata storage",
     ),
 ):
     """Bootstrap the dataset by downloading the Kaggle snapshot and partitioning it."""
@@ -34,9 +37,12 @@ def init_data(
 
 @data_app.command("update")
 def update_data(
-    output_path: Path = typer.Option(RAW_DATA_DIR / "updates", "--output-path", "-o", help="Updates directory"),
+    output_path: Path = typer.Option(
+        RAW_DATA_DIR / "updates", "--output-path", "-o", help="Updates directory"
+    ),
     from_date: str = typer.Option(
-        None, help="Start date (YYYY-MM-DD). Defaults to the day after the last update date in metadata."
+        None,
+        help="Start date (YYYY-MM-DD). Defaults to the day after the last update date in metadata.",
     ),
     to_date: str = typer.Option(None, help="End date (YYYY-MM-DD). Defaults to today."),
 ):
@@ -52,7 +58,9 @@ def update_data(
                 fg="red",
             )
             raise typer.Exit(1)
-        from_date = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        from_date = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)).strftime(
+            "%Y-%m-%d"
+        )
 
     if not to_date:
         to_date = datetime.now().strftime("%Y-%m-%d")
@@ -159,13 +167,14 @@ def embed_data(
     writer = None
 
     from sentence_transformers import SentenceTransformer
+
     logger.info(f"Loading SentenceTransformer model ('{model_name}')...")
     try:
         model = SentenceTransformer(model_name)
     except Exception as e:
         logger.error(f"Failed to load SentenceTransformer model: {e}")
         raise typer.Exit(1)
-        
+
     pool = model.start_multi_process_pool()
 
     try:
@@ -191,9 +200,8 @@ def embed_data(
 
     logger.info(f"Successfully serialized chunked feature embeddings to {output_path}")
 
-def reduce_embeddings_in_file(
-    input_file: str, output_file: str, pca, batch_size: int = 50000
-):
+
+def reduce_embeddings_in_file(input_file: str, output_file: str, pca, batch_size: int = 50000):
     """
     Stream through an existing parquet file, apply PCA transformation to 'embedding',
     and write to a new parquet file preserving all other columns.
@@ -264,6 +272,7 @@ def reduce_embeddings_in_file(
     except Exception as e:
         logger.error(f"Failed to reduce embeddings during batch iteration: {e}")
 
+
 @data_app.command("reduce")
 def reduce_data(
     file_path: Path = typer.Argument(..., help="Path to the full-size embedded Parquet"),
@@ -273,8 +282,12 @@ def reduce_data(
     ),
     n_components: int = typer.Option(128, help="Number of PCA components to keep"),
     batch_size: int = typer.Option(50000, help="Row count per chunk to process sequentially"),
-    model_path: Path = typer.Option("models/pca_model.joblib", help="Path to save/load the PCA model"),
-    force_train: bool = typer.Option(False, "--force-train", help="Force retrain the PCA model even if it exists"),
+    model_path: Path = typer.Option(
+        "models/pca_model.joblib", help="Path to save/load the PCA model"
+    ),
+    force_train: bool = typer.Option(
+        False, "--force-train", help="Force retrain the PCA model even if it exists"
+    ),
 ):
     """Reduce the dimensionality of embeddings in a Parquet file using PCA."""
     import joblib
@@ -303,47 +316,58 @@ def reduce_data(
             logger.error("No embeddings found to train PCA.")
             raise typer.Exit(1)
         pca = train_pca_model(
-            vectors, 
-            n_components=n_components, 
-            batch_size=batch_size, 
-            model_save_path=str(model_path)
+            vectors,
+            n_components=n_components,
+            batch_size=batch_size,
+            model_save_path=str(model_path),
         )
 
     reduce_embeddings_in_file(str(file_path), str(output_path), pca, batch_size=batch_size)
 
+
 train_app = typer.Typer(help="Modeling and training commands", no_args_is_help=True)
 app.add_typer(train_app, name="train")
 
+
 @train_app.command("tune")
 def tune_model(
-    file_paths: list[str] = typer.Argument(..., help="List of file paths to parquet features to train on"),
+    file_paths: list[str] = typer.Argument(
+        ..., help="List of file paths to parquet features to train on"
+    ),
 ):
     import json
 
     import joblib
+    import mlflow
 
     from patent.config import MODELS_DIR
-    from patent.modeling.iforest.train import train
-    
+    from patent.modeling.iforest.train import optimize_iforest
+
     # 1. Fetch vectors
     vectors = get_vectors_from_files(file_paths)
-    
+
     if len(vectors) == 0:
         logger.error("No embeddings found in the provided files.")
         raise typer.Exit(1)
-        
+
+    # Setup MLflow
+    experiment = mlflow.set_experiment("IForest-Novelty")
+
     # 2. Optimize and train
-    result = train(vectors)
+    result = optimize_iforest(
+        vectors, run_name="Isolation Forest CLI Hypertune", experiment_id=experiment.experiment_id
+    )
     best_params = result["params"]
     model = result["model"]
-    evaluation = result["evaluation"]
-    
-    # 3. Dump params, metrics and model
+    evaluation = result["metrics"]
+
+    # 3. Dump params, metrics and model locally
     import datetime
+
     run_timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     run_dir = MODELS_DIR / f"run_{run_timestamp}"
     run_dir.mkdir(parents=True, exist_ok=True)
-    
+
     param_out_path = run_dir / "best_if_params.json"
     with open(param_out_path, "w") as f:
         json.dump(best_params, f, indent=4)
@@ -354,8 +378,9 @@ def tune_model(
 
     model_out_path = run_dir / "isolation_forest.pkl"
     joblib.dump(model, model_out_path)
-        
-    logger.success(f"Dumped model, metrics, and parameters to {run_dir}")
+
+    logger.success(f"Dumped model, metrics, and parameters to {run_dir} and MLFlow!")
+
 
 if __name__ == "__main__":
     app()
