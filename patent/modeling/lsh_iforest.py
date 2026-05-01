@@ -291,7 +291,6 @@ class LSHIForest:
 
     def calculate_baseline(
         self,
-        signatures_path: str,
         output_path: str = "novelty_scores.npy",
     ) -> np.ndarray:
         print("Calculating baseline novelty scores...")
@@ -301,14 +300,10 @@ class LSHIForest:
                 "Number of rows isn't known. Please train or load the database first."
             )
 
-        signatures_mmap = np.memmap(
-            signatures_path,
-            dtype="uint64",
-            mode="r",
-            offset=self.HEADER_SIZE,
-            shape=(self.meta.num_trees, self.meta.num_rows),
-        )
+        if self.forest_mmap is None:
+            raise RuntimeError("Model is not loaded")
 
+        signatures_mmap = self.forest_mmap
         total_path_lengths = np.zeros(self.meta.num_rows, dtype=np.float32)
 
         for tree_idx in range(self.meta.num_trees):
@@ -327,31 +322,53 @@ class LSHIForest:
         print(f"Baseline complete. Average baseline path lengths saved to {output_path}")
         return average_path_lengths
 
-    def score(self, new_embedding: np.ndarray) -> float:
+    def score(self, new_embeddings: np.ndarray) -> np.ndarray | float:
         if self.forest_mmap is None or self.projections is None:
             raise RuntimeError("Database signatures are not loaded.")
 
-        total_depth = 0.0
-        vector = new_embedding.reshape(1, -1)
+        meta = self._loaded_meta()
 
-        for tree_idx in range(self.meta.num_trees):
-            new_sig = self._compute_simhash(vector, self.projections[tree_idx])[0]
+        is_single = new_embeddings.ndim == 1
+        vectors = new_embeddings.reshape(1, -1) if is_single else new_embeddings
+        num_queries = vectors.shape[0]
+
+        total_depths = np.zeros(num_queries, dtype=np.float32)
+
+        for tree_idx in range(meta.num_trees):
+            new_sigs = self._compute_simhash(vectors, self.projections[tree_idx])
             tree_db_sigs = self.forest_mmap[tree_idx]
-            isolation_depth = self.meta.max_depth
 
-            for depth in range(1, self.meta.max_depth):
-                shift = np.uint64(64 - (depth * 4))
-                new_prefix = new_sig >> shift
+            isolation_depths = np.full(num_queries, meta.max_depth, dtype=np.float32)
 
-                search_target = new_prefix << shift
-                idx = np.searchsorted(tree_db_sigs, search_target)
+            active_mask = np.ones(num_queries, dtype=bool)
 
-                exists = idx < self.meta.num_rows and (tree_db_sigs[idx] >> shift) == new_prefix
-
-                if not exists:
-                    isolation_depth = depth
+            for depth in range(1, meta.max_depth):
+                if not np.any(active_mask):
                     break
 
-            total_depth += isolation_depth
+                shift = np.uint64(64 - (depth * 4))
 
-        return total_depth / self.meta.num_trees
+                active_sigs = new_sigs[active_mask]
+                new_prefixes = active_sigs >> shift
+                search_targets = new_prefixes << shift
+
+                idx = np.searchsorted(tree_db_sigs, search_targets)
+
+                valid_idx = idx < meta.num_rows
+                safe_idx = np.clip(idx, 0, meta.num_rows - 1)
+                exists = valid_idx & ((tree_db_sigs[safe_idx] >> shift) == new_prefixes)
+
+                isolated_mask = ~exists
+
+                if np.any(isolated_mask):
+                    active_indices = np.where(active_mask)[0]
+                    newly_isolated_indices = active_indices[isolated_mask]
+
+                    isolation_depths[newly_isolated_indices] = depth
+                    active_mask[newly_isolated_indices] = False
+
+            total_depths += isolation_depths
+
+        mean_depths = total_depths / meta.num_trees
+
+        return float(mean_depths[0]) if is_single else mean_depths
