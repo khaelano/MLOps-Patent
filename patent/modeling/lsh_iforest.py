@@ -15,6 +15,8 @@ from loguru import logger
 import mlflow
 import numpy as np
 
+from patent.utils import byte_to_mbyte, format_mb
+
 
 class LSHIFWrapper(mlflow.pyfunc.PythonModel):
     def load_context(self, context: mlflow.pyfunc.PythonModelContext) -> None:
@@ -192,7 +194,7 @@ class LSHIForest:
 
     @classmethod
     def load_model(cls, model_path_str: str | Path = "output.lshif") -> LSHIForest:
-        model_path = Path(model_path_str).resolve()
+        model_path = Path(model_path_str)
         logger.info(f"Loading LSHiForest model from {model_path}...")
 
         with open(model_path, "rb") as f:
@@ -299,6 +301,7 @@ class LSHIForest:
 
         tracemalloc.start()
         for tree_idx in range(start_tree, loaded_meta.num_trees):
+            tracemalloc.reset_peak()
             logger.debug(f"Building signatures for tree {tree_idx + 1}/{loaded_meta.num_trees}...")
             tree_build_start_time = time.perf_counter()
             projection_matrix = self._get_hyperplanes(tree_idx)
@@ -318,9 +321,8 @@ class LSHIForest:
                 peak_mem, curr_mem = tracemalloc.get_traced_memory()
                 mlflow.log_metrics(
                     {
-                        "trees_built": tree_idx + 1,
-                        "time_taken": tree_build_start_time - time.perf_counter(),
-                        "peak_memory_usage": peak_mem,
+                        "tree_build_time_s": time.perf_counter() - tree_build_start_time,
+                        "tree_build_peak_memory_mb": byte_to_mbyte(peak_mem),
                     },
                     step=tree_idx,
                 )
@@ -338,7 +340,7 @@ class LSHIForest:
         logger.success(f"Forest generation complete in {build_time:.2f} seconds.")
 
         if mlflow.active_run():
-            mlflow.log_metric("build_time", build_time)
+            mlflow.log_metric("forest_build_time_s", build_time)
 
     def calculate_baseline(
         self,
