@@ -1,4 +1,6 @@
+from contextlib import contextmanager
 import gc
+from typing import Any
 
 from loguru import logger
 import numpy as np
@@ -9,7 +11,16 @@ from patent.config import RAW_DATA_DIR
 LAST_UPDATE_FILE = RAW_DATA_DIR / "last_update.txt"
 
 
-def flatten_dict(d, parent_key="", sep="/"):
+@contextmanager
+def mute_logging(module_name=""):
+    logger.disable(module_name)
+    try:
+        yield
+    finally:
+        logger.enable(module_name)
+
+
+def flatten_dict(d, parent_key="", sep="/") -> dict[str, Any]:
     items = []
     for k, v in d.items():
         new_key = f"{parent_key}{sep}{k}" if parent_key else k

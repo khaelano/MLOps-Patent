@@ -12,6 +12,7 @@ from scipy.stats import spearmanr
 import seaborn as sns
 
 from patent.modeling.lsh_iforest import LSHIForest
+from patent.utils import mute_logging
 
 
 def plot_baseline_dist(npy_path: str = "novelty_scores.npy") -> plt.Figure:
@@ -100,19 +101,25 @@ def _spearman_sampled(scores_a, scores_b, sample_size=100_000, seed=42) -> float
 
 
 def _jaccard_topk(scores_a, scores_b, top_k: int) -> float:
-    """Compute Jaccard similarity of top-k indices (highest scores)."""
+    """Compute Jaccard similarity of top-k indices (highest scores = most anomalous)."""
     valid_mask = np.isfinite(scores_a) & np.isfinite(scores_b)
-
-    top_a = np.argpartition(scores_a, -top_k)[-top_k:]
-    top_b = np.argpartition(scores_b, -top_k)[-top_k:]
-
     valid_idx = np.where(valid_mask)[0]
-    top_a = np.intersect1d(top_a, valid_idx)
-    top_b = np.intersect1d(top_b, valid_idx)
+    n_valid = len(valid_idx)
 
-    intersection = np.intersect1d(top_a, top_b, assume_unique=True)
-    union = np.union1d(top_a, top_b)
-    return len(intersection) / len(union) if len(union) > 0 else 1.0
+    if n_valid == 0:
+        return 1.0
+
+    actual_k = min(top_k, n_valid)
+
+    top_a_local = np.argsort(-scores_a[valid_idx], kind="stable")[:actual_k]
+    top_b_local = np.argsort(-scores_b[valid_idx], kind="stable")[:actual_k]
+
+    top_a = valid_idx[top_a_local]
+    top_b = valid_idx[top_b_local]
+
+    intersection = len(np.intersect1d(top_a, top_b, assume_unique=True))
+    union = len(np.union1d(top_a, top_b))
+    return intersection / union if union > 0 else 1.0
 
 
 def calculate_stability_metrics_n(
@@ -213,36 +220,38 @@ def calculate_stability_metrics_n(
         "pairwise_spearman": pairwise_spearman,
         "pairwise_jaccard": pairwise_jaccard,
         "summary": summary,
-        "spearman_matrix": spearman_matrix,
-        "jaccard_matrix": jaccard_matrix,
+        "spearman_matrix": spearman_matrix.tolist(),
+        "jaccard_matrix": jaccard_matrix.tolist(),
         "model_names": model_names,
     }
 
 
 def evaluate_params(embeddings_path: str | Path, num_trees: int, max_depth: int) -> dict[str, Any]:
     seeds = [234, 223, 342, 122, 89]
-    output_dir = Path(tempfile.gettempdir()) / "lshif_evaluate"
+    temp_dir = Path(tempfile.mkdtemp())
 
     score_paths = []
     model_names = []
 
     with contextlib.nullcontext():
-        for k in seeds:
-            output_path = output_dir / "depths_{k}.npy"
-            model = LSHIForest(num_trees=num_trees, max_depth=max_depth)
-            model.build_forest(
-                embeddings_dim=384,
-                embeddings_path=embeddings_path,
-                baseline_output_path=output_path,
-            )
-            score_paths.append(output_path)
-            model_names.append(f"lshif_{k}")
+        with mute_logging():
+            for k in seeds:
+                baseline_path = temp_dir / f"depths_{k}.npy"
+
+                model = LSHIForest(num_trees=num_trees, max_depth=max_depth, seed=k)
+                model.build_forest(
+                    embeddings_dim=384,
+                    embeddings_path=embeddings_path,
+                    baseline_output_path=baseline_path,
+                )
+                score_paths.append(baseline_path)
+                model_names.append(f"lshif_{k}")
 
     metrics = calculate_stability_metrics_n(
         score_paths=score_paths,
         model_names=model_names,
     )
 
-    shutil.rmtree(output_dir)
+    shutil.rmtree(temp_dir)
 
     return metrics

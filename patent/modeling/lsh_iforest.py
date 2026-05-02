@@ -71,7 +71,7 @@ class LSHIForest:
             seed=seed,
         )
 
-        self.model_path: Path = Path(tempfile.gettempdir()) / "forest.memmap"
+        self.model_path: Path = Path(tempfile.mkdtemp()) / "model.lshif"
         self.forest_mmap: np.memmap | None = None
         self.projections: list[np.ndarray] | None = None
 
@@ -100,10 +100,10 @@ class LSHIForest:
         return self.meta
 
     def _get_hyperplanes(self, tree_idx: int) -> np.ndarray:
-        np.random.seed(self.meta.seed + tree_idx)
+        rng = np.random.default_rng(self.meta.seed + tree_idx)
         dim = self._loaded_meta().embedding_dim
         assert dim is not None
-        return np.random.standard_normal((dim, 64)).astype("float32")
+        return rng.standard_normal((dim, 64)).astype("float32")
 
     def _compute_simhash(self, vectors: np.ndarray, projection_matrix: np.ndarray) -> np.ndarray:
         projected = np.dot(vectors, projection_matrix)
@@ -347,6 +347,7 @@ class LSHIForest:
         self._dump_meta(self.model_path)
 
         if baseline_output_path is not None:
+            logger.debug(f"Dumping baseline scores at {baseline_output_path}.")
             np.save(baseline_output_path, baseline_depths)
 
         for p in [checkpoint_path, depths_path]:
