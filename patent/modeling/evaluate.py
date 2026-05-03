@@ -226,7 +226,9 @@ def calculate_stability_metrics_n(
     }
 
 
-def evaluate_params(embeddings_path: str | Path, num_trees: int, max_depth: int) -> dict[str, Any]:
+def evaluate_params(
+    embeddings_path: list[str] | list[Path], num_trees: int, max_depth: int
+) -> dict[str, Any]:
     seeds = [234, 223, 342, 122, 89]
     temp_dir = Path(tempfile.mkdtemp())
 
@@ -240,8 +242,7 @@ def evaluate_params(embeddings_path: str | Path, num_trees: int, max_depth: int)
 
                 model = LSHIForest(num_trees=num_trees, max_depth=max_depth, seed=k)
                 model.build_forest(
-                    embeddings_dim=384,
-                    embeddings_path=embeddings_path,
+                    embeddings_paths=embeddings_path,
                     baseline_output_path=baseline_path,
                 )
                 score_paths.append(baseline_path)

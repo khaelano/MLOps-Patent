@@ -14,6 +14,7 @@ from loguru import logger
 import mlflow
 from mlflow.models import infer_signature
 import numpy as np
+import pyarrow.parquet as pq
 
 from patent.utils import byte_to_mbyte
 
@@ -45,6 +46,7 @@ class LSHIFMeta:
     max_depth: int = 16
     seed: int = 42
     c_n: float | None = None
+    is_sorted: bool = False
 
 
 class LSHIForest:
@@ -184,6 +186,64 @@ class LSHIForest:
         logger.debug(f"Inferred {inferred_rows} rows from file size {file_size_bytes} bytes.")
         return inferred_rows
 
+    def _c_factor(self, n: int) -> float:
+        if n <= 1:
+            return 0.0
+        return float(2 * (np.log(n - 1) + 0.5772156649) - (2 * (n - 1) / n))
+
+    def _calculate_baseline(
+        self,
+        baseline_output_path: str | Path | None = None,
+    ) -> None:
+        """
+        Pass 2: Calculates path depths by reading one tree at a time from the built forest.
+        This allows baseline calculation after a Row-First stream like build_from_pq.
+        """
+        logger.info("Starting Pass 2: Baseline depth calculation...")
+        calc_start_time = time.perf_counter()
+
+        meta = self._loaded_meta()
+        assert meta.num_rows is not None
+        assert self.forest_mmap is not None
+
+        signatures_mmap = self.forest_mmap
+
+        total_depths = np.zeros(meta.num_rows, dtype=np.float32)
+
+        tracemalloc.start()
+        for tree_idx in range(meta.num_trees):
+            logger.debug(f"Calculating depths for tree {tree_idx + 1}/{meta.num_trees}...")
+
+            tree_signatures = signatures_mmap[tree_idx, :].copy()
+
+            path_lengths = self._build_single_tree(tree_signatures)
+            total_depths += path_lengths
+
+            tree_signatures.sort()
+            signatures_mmap[tree_idx, :] = tree_signatures
+            signatures_mmap.flush()
+
+        tracemalloc.stop()
+
+        baseline_depths = total_depths / meta.num_trees
+        c_n = self._c_factor(meta.num_rows)
+        self.meta.c_n = c_n
+        self.meta.is_sorted = True
+
+        self._dump_meta(self.model_path)
+
+        if baseline_output_path is not None:
+            logger.debug(f"Dumping baseline scores at {baseline_output_path}.")
+            np.save(baseline_output_path, baseline_depths)
+
+        build_time = time.perf_counter() - calc_start_time
+        logger.success(f"Baseline calculation complete in {build_time:.2f}s. c_n={c_n:.4f}")
+
+        if mlflow.active_run():
+            mlflow.log_metric("baseline_calc_time_s", build_time)
+            mlflow.log_metric("c_n", c_n)
+            mlflow.log_artifact(str(baseline_output_path), artifact_path="baselines")
+
     @classmethod
     def load_model(cls, model_path_str: str | Path = "output.lshif") -> LSHIForest:
         model_path = Path(model_path_str)
@@ -225,7 +285,7 @@ class LSHIForest:
         if mlflow.active_run():
             logger.debug("Logging model to MLflow...")
 
-            input_example = np.random.randn(3, 384).astype("float32")
+            input_example = np.random.randn(30, 384).astype("float32")
             output_example = self.score(input_example)
 
             mlflow.pyfunc.log_model(
@@ -238,129 +298,101 @@ class LSHIForest:
 
         logger.success("Model saved successfully.")
 
-    def build_forest(
+    def _build_forest(
         self,
-        embeddings_path: str | Path,
-        embeddings_dim: int,
-        baseline_output_path: str | Path | None = "baseline_depths.npy",
-        resume: bool = True,
-    ) -> None:
-        logger.info(f"Starting forest build from embeddings: {embeddings_path}")
+        pq_paths: list[str] | list[Path],
+        column: str = "embedding",
+        chunk_size: int = 100_000,
+    ):
+        """Streams parquet files directly into SimHash signatures without intermediate float storage."""
+        logger.info("Starting forest build from Parquet streams...")
         forest_build_start_time = time.perf_counter()
-
-        self.meta.embedding_dim = embeddings_dim
-        self.meta.num_rows = self._calc_mmap_row(embeddings_path, embeddings_dim)
-
-        loaded_meta = self._loaded_meta()
-        assert loaded_meta.num_rows is not None
-        assert loaded_meta.embedding_dim is not None
 
         if mlflow.active_run():
             mlflow.log_params(
                 {
-                    "seed": loaded_meta.seed,
-                    "max_depth": loaded_meta.max_depth,
-                    "num_trees": loaded_meta.num_trees,
+                    "seed": self.meta.seed,
+                    "max_depth": self.meta.max_depth,
+                    "num_trees": self.meta.num_trees,
                 }
             )
 
-        checkpoint_path = Path(tempfile.gettempdir()) / "forest.resume"
-        depths_path = Path(tempfile.gettempdir()) / "forest_depths.npy"
-        model_output_path = str(self.model_path)
+        total_rows = 0
+        for pq_path in pq_paths:
+            pq_file = pq.ParquetFile(pq_path)
+            total_rows += pq_file.metadata.num_rows
 
-        start_tree = 0
-        if not os.path.exists(model_output_path):
-            logger.debug(f"Initializing empty forest map at {model_output_path}")
-            with open(model_output_path, "wb") as f:
-                f.write(b" " * self.HEADER_SIZE)
+        first_pq = pq.ParquetFile(pq_paths[0])
+        first_batch = next(first_pq.iter_batches(batch_size=1, columns=[column]))
+        embedding_dim = len(first_batch.column(0)[0])
 
-        if resume and depths_path.exists():
-            total_depths = np.load(depths_path)
-            logger.info("Resuming baseline depth accumulator from disk.")
-        else:
-            total_depths = np.zeros(loaded_meta.num_rows, dtype=np.float32)
+        self.meta.embedding_dim = embedding_dim
+        self.meta.num_rows = total_rows
 
-        if resume and os.path.exists(checkpoint_path) and os.path.exists(model_output_path):
-            with open(checkpoint_path, "r") as f:
-                content = f.read().strip()
-                if content:
-                    start_tree = int(content)
-                    logger.info(f"Found checkpoint! Resuming from Tree {start_tree + 1}...")
+        projections_list = [self._get_hyperplanes(i) for i in range(self.meta.num_trees)]
+        self.projections = projections_list
 
-        if start_tree >= loaded_meta.num_trees:
-            logger.info("Forest is already fully built according to the checkpoint.")
-            return
-
-        embeddings_mmap = np.memmap(
-            embeddings_path,
-            dtype="float32",
-            mode="r",
-            shape=(loaded_meta.num_rows, loaded_meta.embedding_dim),
-        )
-        signatures_mmap = np.memmap(
-            model_output_path,
+        signatures = np.memmap(
+            self.model_path,
             dtype="uint64",
-            mode="r+",
+            mode="w+",
             offset=self.HEADER_SIZE,
-            shape=(loaded_meta.num_trees, loaded_meta.num_rows),
+            shape=(self.meta.num_trees, total_rows),
         )
 
+        curr_idx = 0
+        batch_idx = 0
         tracemalloc.start()
-        for tree_idx in range(start_tree, loaded_meta.num_trees):
-            tracemalloc.reset_peak()
-            logger.debug(f"Building signatures for tree {tree_idx + 1}/{loaded_meta.num_trees}...")
-            tree_build_start_time = time.perf_counter()
-            projection_matrix = self._get_hyperplanes(tree_idx)
-            signatures = self._generate_signatures_for_tree(
-                embeddings_mmap, projection_matrix, self.chunk_size
-            )
+        for pq_path in pq_paths:
+            logger.info(f"Streaming {pq_path} into LSHiForest...")
+            pq_file = pq.ParquetFile(pq_path)
 
-            path_lengths = self._build_single_tree(signatures)
-            total_depths += path_lengths
+            for batch in pq_file.iter_batches(batch_size=chunk_size, columns=[column]):
+                tracemalloc.reset_peak()
+                batch_start_time = time.perf_counter()
 
-            signatures.sort()
-            signatures_mmap[tree_idx] = signatures
-            signatures_mmap.flush()
+                flat_arr = batch.column(0).flatten().to_numpy()
+                arr = flat_arr.reshape(-1, embedding_dim)  # Shape: (chunk_size, 384)
 
-            with open(checkpoint_path, "w") as f:
-                f.write(str(tree_idx + 1))
-            np.save(depths_path, total_depths)
+                slice_end = curr_idx + len(arr)
 
-            if mlflow.active_run():
-                peak_mem, curr_mem = tracemalloc.get_traced_memory()
-                mlflow.log_metrics(
-                    {
-                        "tree_build_time_s": time.perf_counter() - tree_build_start_time,
-                        "tree_build_peak_memory_mb": byte_to_mbyte(peak_mem),
-                    },
-                    step=tree_idx,
-                )
+                for tree_idx in range(self.meta.num_trees):
+                    packed_signature = self._compute_simhash(arr, projections_list[tree_idx])
+                    signatures[tree_idx, curr_idx:slice_end] = packed_signature
 
+                curr_idx = slice_end
+
+                if mlflow.active_run():
+                    peak_mem, _ = tracemalloc.get_traced_memory()
+                    mlflow.log_metrics(
+                        {
+                            "batch_build_time_s": time.perf_counter() - batch_start_time,
+                            "batch_build_peak_memory_mb": byte_to_mbyte(peak_mem),
+                        },
+                        step=batch_idx,
+                    )
+                batch_idx += 1
+
+        signatures.flush()
         tracemalloc.stop()
 
-        self.forest_mmap = signatures_mmap
-        self.projections = [self._get_hyperplanes(i) for i in range(loaded_meta.num_trees)]
-
-        baseline_depths = total_depths / loaded_meta.num_trees
-        c_n = float(np.mean(baseline_depths))
-        self.meta.c_n = c_n
-        self._dump_meta(self.model_path)
-
-        if baseline_output_path is not None:
-            logger.debug(f"Dumping baseline scores at {baseline_output_path}.")
-            np.save(baseline_output_path, baseline_depths)
-
-        for p in [checkpoint_path, depths_path]:
-            if p.exists():
-                p.unlink()
+        self.forest_mmap = signatures
 
         build_time = time.perf_counter() - forest_build_start_time
-        logger.success(f"Forest & baseline complete in {build_time:.2f}s. c_n={c_n:.4f}")
+        logger.success(f"Streaming and forest construction complete in {build_time:.2f}s.")
 
         if mlflow.active_run():
             mlflow.log_metric("forest_build_time_s", build_time)
-            mlflow.log_metric("c_n", c_n)
-            mlflow.log_artifact(str(baseline_output_path), artifact_path="baselines")
+
+    def build_forest(
+        self,
+        embeddings_paths: list[str] | list[Path],
+        baseline_output_path: str | Path | None = None,
+        column: str = "embedding",
+        chunk_size: int = 200_000,
+    ):
+        self._build_forest(embeddings_paths, column, chunk_size)
+        self._calculate_baseline(baseline_output_path)
 
     def score(self, new_embeddings: np.ndarray, normalize: bool = True) -> np.ndarray:
         if self.forest_mmap is None or self.projections is None:
@@ -369,17 +401,41 @@ class LSHIForest:
             raise RuntimeError(err_msg)
 
         meta = self._loaded_meta()
+        if not meta.is_sorted:
+            err_msg = "Forest signatures are not sorted. Cannot run binary search. Run build process to enable scoring."
+            logger.error(err_msg)
+            raise RuntimeError(err_msg)
+
         assert meta.num_rows is not None
 
         vectors = np.atleast_2d(new_embeddings)
         num_queries = vectors.shape[0]
         logger.debug(f"Scoring {num_queries} queried vectors...")
 
+        score_start_time = time.perf_counter()
+        tracemalloc.start()
+        tracemalloc.reset_peak()
+
         total_depths = np.zeros(num_queries, dtype=np.float32)
 
         for tree_idx in range(meta.num_trees):
             new_sigs = self._compute_simhash(vectors, self.projections[tree_idx])
-            tree_db_sigs = self.forest_mmap[tree_idx]
+            tree_db_sigs = self.forest_mmap[tree_idx, :]
+            idx = np.searchsorted(tree_db_sigs, new_sigs)
+
+            valid_right = idx < meta.num_rows
+            valid_left = idx > 0
+
+            idx_right = np.where(valid_right, idx, meta.num_rows - 1)
+            idx_left = np.where(valid_left, idx - 1, 0)
+
+            right_sigs = tree_db_sigs[idx_right]
+            left_sigs = tree_db_sigs[idx_left]
+
+            diff_right = np.where(valid_right, new_sigs ^ right_sigs, ~np.uint64(0))
+            diff_left = np.where(valid_left, new_sigs ^ left_sigs, ~np.uint64(0))
+
+            min_diff = np.minimum(diff_right, diff_left)
 
             isolation_depths = np.full(num_queries, meta.max_depth, dtype=np.float32)
             active_mask = np.ones(num_queries, dtype=bool)
@@ -389,25 +445,40 @@ class LSHIForest:
                     break
 
                 shift = np.uint64(64 - (depth * 4))
-                active_sigs = new_sigs[active_mask]
-                new_prefixes = active_sigs >> shift
-                search_targets = new_prefixes << shift
+                isolated = (min_diff[active_mask] >> shift) > 0
 
-                idx = np.searchsorted(tree_db_sigs, search_targets)
-                valid_idx = idx < meta.num_rows
-                safe_idx = np.clip(idx, 0, meta.num_rows - 1)
-                exists = valid_idx & ((tree_db_sigs[safe_idx] >> shift) == new_prefixes)
-                isolated_mask = ~exists
-
-                if np.any(isolated_mask):
+                if np.any(isolated):
                     active_indices = np.where(active_mask)[0]
-                    newly_isolated_indices = active_indices[isolated_mask]
+                    newly_isolated_indices = active_indices[isolated]
                     isolation_depths[newly_isolated_indices] = depth
                     active_mask[newly_isolated_indices] = False
 
             total_depths += isolation_depths
 
         mean_depths = total_depths / meta.num_trees
+
+        peak_mem, _ = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        score_time = time.perf_counter() - score_start_time
+
+        avg_time_per_query = score_time / num_queries
+        avg_mem_per_query = byte_to_mbyte(peak_mem) / num_queries
+
+        logger.info(
+            f"Scored {num_queries} vectors in {score_time:.4f}s "
+            f"(Avg: {avg_time_per_query:.5f}s/query). "
+            f"Batch Peak memory: {byte_to_mbyte(peak_mem):.2f} MB "
+            f"(Avg: {avg_mem_per_query:.4f} MB/query)"
+        )
+
+        if mlflow.active_run():
+            mlflow.log_metrics(
+                {
+                    "score_time_s": score_time,
+                    "score_peak_memory_mb": byte_to_mbyte(peak_mem),
+                    "avg_score_time_per_query_s": avg_time_per_query,
+                }
+            )
 
         if normalize:
             if meta.c_n is None or meta.c_n <= 0:
