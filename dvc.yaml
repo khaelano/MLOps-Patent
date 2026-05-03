@@ -1,0 +1,15 @@
+stages:
+  preprocess:
+    cmd: uv run pipelines/preprocess.py
+    deps:
+      - data/raw/
+    outs:
+      - data/interim/
+      - data/processed
+
+  training:
+    cmd: uv run pipelines/train.py --params pipelines/params.json
+    deps:
+      - data/processed/
+    outs:
+      - models/
