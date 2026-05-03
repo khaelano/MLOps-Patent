@@ -9,7 +9,7 @@ import mlflow
 import numpy as np
 import pyarrow.parquet as pq
 
-from patent.config import CHUNK_SIZE
+from patent.config import CHUNK_SIZE, PROCESSED_DATA_DIR
 from patent.modeling.evaluate import evaluate_params
 from patent.modeling.lsh_iforest import LSHIForest
 from patent.utils import flatten_dict
@@ -111,7 +111,7 @@ def train_model(
     output_dir = Path(output_dir)
     model_path = str((output_dir / "model.lshif"))
     baseline_path = str((output_dir / "baseline_depth.npy"))
-    embeddings_paths = [f for f in embeddings_dir.iterdir() if f.is_file()]
+    embeddings_paths = list(PROCESSED_DATA_DIR.glob("*.parquet"))
 
     mlflow_run = (
         mlflow.start_run(**mlflow_context) if mlflow_context is not None else nullcontext()
