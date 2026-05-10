@@ -1,7 +1,6 @@
 from datetime import datetime, timedelta
 import json
 from pathlib import Path
-import re
 import time
 
 from loguru import logger
@@ -10,7 +9,7 @@ import requests
 OAI_BASE_URL = "https://oaipmh.arxiv.org/oai"
 
 
-def extract_latest_update(snapshot_file: Path) -> str | None:
+def extract_latest_update(snapshot_file: Path) -> str:
     """Scan the Kaggle snapshot and return the latest update_date found."""
     if not snapshot_file:
         raise ValueError("snapshot_file path must be provided")
@@ -31,17 +30,17 @@ def extract_latest_update(snapshot_file: Path) -> str | None:
                     continue
     except Exception as e:
         logger.error(f"Failed to scan snapshot: {e}")
-        return None
+        return latest_date
 
     logger.info(f"Found latest update date: {latest_date}")
-    return latest_date if latest_date else None
+    return latest_date
 
 
 def download_kaggle_snapshot(output_path: Path) -> Path:
     """Download the latest arXiv snapshot from Kaggle and return the path."""
     if not output_path:
         raise ValueError("output_path must be provided")
-        
+
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -87,7 +86,7 @@ def fetch_oai_updates(output_path: Path, from_date: str, to_date: str):
     timestamp = datetime.now().strftime("%H%M%S")
     job_dir = output_path / f"arxiv_updates_{from_date}_to_{to_date}_{timestamp}"
     job_dir.mkdir(parents=True, exist_ok=True)
-    
+
     total_records = 0
 
     current_date = start_date
@@ -106,31 +105,34 @@ def fetch_oai_updates(output_path: Path, from_date: str, to_date: str):
         while True:
             logger.info(f"Fetching page {page} for {current_date_str}...")
             try:
-                response = requests.get(OAI_BASE_URL, params=params, timeout=60)
+                response = requests.get(OAI_BASE_URL, params=params, timeout=60, stream=True)
                 response.raise_for_status()
-                content_str = response.text
 
-                records = re.findall(r"<record.*?>.*?</record>", content_str, re.DOTALL)
+                out_file = job_dir / f"{current_date_str}_page_{page}.xml"
+                record_count = 0
+                tail = ""
+                with open(out_file, "w", encoding="utf-8") as f_out:
+                    for chunk in response.iter_content(chunk_size=65536, decode_unicode=True):
+                        f_out.write(chunk)
+                        record_count += chunk.count("<record")
+                        tail = (tail + chunk)[-16384:]
 
-                if not records:
+                if record_count == 0:
                     logger.info("No records found in this page.")
+                    out_file.unlink(missing_ok=True)
                 else:
-                    out_file = job_dir / f"{current_date_str}_page_{page}.xml"
-                    with open(out_file, "w", encoding="utf-8") as f_out:
-                        f_out.write(content_str)
-
                     logger.info(
-                        f"Saved {len(records)} records for {current_date_str} to {out_file.name}"
+                        f"Saved {record_count} records for {current_date_str} to {out_file.name}"
                     )
-                    total_records += len(records)
+                    total_records += record_count
 
-                if "<resumptionToken" not in content_str:
+                if "<resumptionToken" not in tail:
                     logger.info("No more pages to fetch for this date.")
                     break
 
-                start_idx = content_str.find(">", content_str.find("<resumptionToken")) + 1
-                end_idx = content_str.find("</resumptionToken>")
-                token = content_str[start_idx:end_idx].strip()
+                start_idx = tail.find(">", tail.find("<resumptionToken")) + 1
+                end_idx = tail.find("</resumptionToken>")
+                token = tail[start_idx:end_idx].strip() if end_idx > start_idx else ""
 
                 if not token:
                     logger.info("Empty resumption token found. Moving on.")
