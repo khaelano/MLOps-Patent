@@ -56,7 +56,7 @@ class LSHIForest:
         self,
         num_trees: int = 50,
         max_depth: int = 16,
-        chunk_size: int = 200_000,
+        chunk_size: int = 100_000,
         seed: int = 42,
     ) -> None:
         if max_depth > 16:
@@ -128,29 +128,39 @@ class LSHIForest:
 
         return signatures
 
-    def _build_single_tree(self, signatures: np.ndarray) -> np.ndarray:
+    def _build_single_tree_sorted(
+        self, sorted_sigs: np.ndarray, sorted_idx: np.ndarray
+    ) -> np.ndarray:
+        """
+        Compute isolation path lengths on already-sorted signatures.
+
+        Operates in O(n) per depth via linear neighbour comparison instead of
+        O(n log n) np.unique calls.  Results are mapped back to original order
+        via *sorted_idx*.
+        """
         meta = self._loaded_meta()
-        n = len(signatures)
-        path_lengths = np.full(n, meta.max_depth, dtype=np.float32)
-        active_mask = np.ones(n, dtype=bool)
+        n = len(sorted_sigs)
+        isolated_depth = np.full(n, meta.max_depth, dtype=np.float32)
 
         for depth in range(1, meta.max_depth):
-            if not np.any(active_mask):
+            still_active = isolated_depth == meta.max_depth
+            if not np.any(still_active):
                 break
 
             shift = np.uint64(64 - (depth * 4))
-            active_sigs = signatures[active_mask]
-            prefixes = active_sigs >> shift
+            prefixes = sorted_sigs >> shift
 
-            _, inverse, counts = np.unique(prefixes, return_inverse=True, return_counts=True)
-            isolated_mask = counts[inverse] == 1
+            neighbor_eq = prefixes[:-1] == prefixes[1:]
 
-            if np.any(isolated_mask):
-                active_indices = np.where(active_mask)[0]
-                newly_isolated = active_indices[isolated_mask]
-                path_lengths[newly_isolated] = depth
-                active_mask[newly_isolated] = False
+            isolation = np.ones(n, dtype=bool)
+            isolation[1:] &= ~neighbor_eq
+            isolation[:-1] &= ~neighbor_eq
 
+            newly_isolated = isolation & still_active
+            isolated_depth[newly_isolated] = float(depth)
+
+        path_lengths = np.empty(n, dtype=np.float32)
+        path_lengths[sorted_idx] = isolated_depth
         return path_lengths
 
     def _calc_mmap_row(
@@ -214,14 +224,17 @@ class LSHIForest:
         for tree_idx in range(meta.num_trees):
             logger.debug(f"Calculating depths for tree {tree_idx + 1}/{meta.num_trees}...")
 
-            tree_signatures = signatures_mmap[tree_idx, :].copy()
+            tree_sigs = signatures_mmap[tree_idx, :].copy()
+            sorted_idx = np.argsort(tree_sigs)
+            sorted_sigs = tree_sigs[sorted_idx]
+            del tree_sigs
 
-            path_lengths = self._build_single_tree(tree_signatures)
+            path_lengths = self._build_single_tree_sorted(sorted_sigs, sorted_idx)
             total_depths += path_lengths
 
-            tree_signatures.sort()
-            signatures_mmap[tree_idx, :] = tree_signatures
+            signatures_mmap[tree_idx, :] = sorted_sigs
             signatures_mmap.flush()
+            del sorted_sigs, sorted_idx, path_lengths
 
         tracemalloc.stop()
 
@@ -389,7 +402,7 @@ class LSHIForest:
         embeddings_paths: list[str] | list[Path],
         baseline_output_path: str | Path | None = None,
         column: str = "embedding",
-        chunk_size: int = 200_000,
+        chunk_size: int = 100_000,
     ):
         self._build_forest(embeddings_paths, column, chunk_size)
         self._calculate_baseline(baseline_output_path)
@@ -417,6 +430,8 @@ class LSHIForest:
         tracemalloc.reset_peak()
 
         total_depths = np.zeros(num_queries, dtype=np.float32)
+        isolation_depths = np.empty(num_queries, dtype=np.float32)
+        active_mask = np.empty(num_queries, dtype=bool)
 
         for tree_idx in range(meta.num_trees):
             new_sigs = self._compute_simhash(vectors, self.projections[tree_idx])
@@ -437,8 +452,8 @@ class LSHIForest:
 
             min_diff = np.minimum(diff_right, diff_left)
 
-            isolation_depths = np.full(num_queries, meta.max_depth, dtype=np.float32)
-            active_mask = np.ones(num_queries, dtype=bool)
+            isolation_depths.fill(meta.max_depth)
+            active_mask.fill(True)
 
             for depth in range(1, meta.max_depth):
                 if not np.any(active_mask):

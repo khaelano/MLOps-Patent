@@ -6,56 +6,11 @@ import tempfile
 from typing import Any, Literal
 
 from loguru import logger
-import matplotlib.pyplot as plt
 import numpy as np
 from scipy.stats import spearmanr
-import seaborn as sns
 
 from patent.modeling.lsh_iforest import LSHIForest
 from patent.utils import mute_logging
-
-
-def plot_baseline_dist(npy_path: str = "novelty_scores.npy") -> plt.Figure:
-    logger.info(f"Loading baseline scores from {npy_path}...")
-    scores = np.load(npy_path)
-    sns.set_theme(style="whitegrid")
-
-    fig, ax = plt.subplots(figsize=(12, 7))
-
-    sns.histplot(scores, bins=150, kde=True, color="#2ca02c", edgecolor="black", alpha=0.6, ax=ax)
-
-    p1 = np.percentile(scores, 1)
-    p5 = np.percentile(scores, 5)
-
-    ax.axvline(
-        p1,
-        color="red",
-        linestyle="--",
-        linewidth=2,
-        label=f"Top 1% Most Novel (Score $\\leq$ {p1:.2f})",
-    )
-    ax.axvline(
-        p5,
-        color="orange",
-        linestyle="--",
-        linewidth=2,
-        label=f"Top 5% Most Novel (Score $\\leq$ {p5:.2f})",
-    )
-
-    ax.set_title(
-        "LSHiForest Baseline Novelty Distribution", fontsize=16, fontweight="bold", pad=15
-    )
-    ax.set_xlabel(
-        "Average Isolation Depth / Path Length\n$\\leftarrow$ Highly Novel | Standard Papers $\\rightarrow$",
-        fontsize=12,
-        labelpad=10,
-    )
-    ax.set_ylabel("Number of Papers", fontsize=12)
-    ax.legend(fontsize=11, loc="upper left")
-
-    fig.tight_layout()
-
-    return fig
 
 
 def calculate_stability_metrics(scores_path_a, scores_path_b, top_k=1000):
