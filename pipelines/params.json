@@ -1,0 +1,10 @@
+{
+  "model_params": {
+    "num_trees": 10,
+    "max_depth": 16
+  },
+  "mlflow_params": {
+    "experiment_name": "LSHiForest",
+    "run_name": "LSHI Test Run"
+  }
+}
