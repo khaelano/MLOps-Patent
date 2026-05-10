@@ -1,0 +1,35 @@
+schema: '2.0'
+stages:
+  preprocess:
+    cmd: uv run pipelines/preprocess.py
+    deps:
+    - path: data/raw/
+      hash: md5
+      md5: d2bc366eb3654792e3169c5415580656.dir
+      size: 5240025807
+      nfiles: 14
+    outs:
+    - path: data/interim/
+      hash: md5
+      md5: fbcac2d4f7d1915d0634693cac3d1a49.dir
+      size: 355885539
+      nfiles: 6
+    - path: data/processed
+      hash: md5
+      md5: f0fb04debf2fe8c8a4d6c170380ad167.dir
+      size: 2367644890
+      nfiles: 3
+  training:
+    cmd: uv run pipelines/train.py --params pipelines/params.json
+    deps:
+    - path: data/processed/
+      hash: md5
+      md5: f0fb04debf2fe8c8a4d6c170380ad167.dir
+      size: 2367644890
+      nfiles: 3
+    outs:
+    - path: models/
+      hash: md5
+      md5: c47fbe41a19eb7b3524120cfcc4ea138.dir
+      size: 132886388
+      nfiles: 2

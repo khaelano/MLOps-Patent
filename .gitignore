@@ -186,3 +186,14 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Temp directory
+.tmp_cache/
+.project_temp
+
+# Local dvc store
+.dvcstore/
+
+# Editor configurations
+.vscode/
+/models
