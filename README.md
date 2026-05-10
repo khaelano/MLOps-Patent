@@ -58,8 +58,8 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
    make data-reduce INPUT=data/processed/updates.parquet
    ```
 
-3. **Train and Tune Model (Isolation Forest)**
-   Dynamically spin up an Optuna study over sampled vectors and track metrics for best configurations. The trained artifacts and optimal scores will automatically export to the `models/run_<timestamp>` directory.
+3. **Train Model (LSHiForest)**
+   Dynamically build and train an LSHiForest (Locality-Sensitive Hashing isolation Forest) model over the semantic vectors. The pipeline natively tracks granular metrics (execution time, query latency, peak memory footprint, baseline C(n)) and serializes the memory-mapped artifacts (`.lshif`) using **MLflow**. Models, artifacts, and metrics are automatically tracked for robust life-cycle versioning.
    ```bash
    make model-tune INPUT=data/processed/updates.parquet
    ```
@@ -76,7 +76,7 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
 | `make data-clean INPUT=<path>`| Run text preprocessing logic |
 | `make data-embed INPUT=<path>`| Run sequence embedding logic |
 | `make data-reduce INPUT=<path>`| Run dimensionality reduction via PCA |
-| `make model-tune INPUT=<path>` | Hyperparameter tune & train Isolation Forest |
+| `make model-tune INPUT=<path>` | Train and serialize LSHiForest model via MLflow |
 | `make test`              | Run tests with pytest                      |
 | `make lint`              | Check code style with ruff                 |
 | `make format`            | Auto-format source code with ruff          |
