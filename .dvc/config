@@ -2,4 +2,7 @@
     autostage = true
     remote = localstore
 ['remote "localstore"']
-    url = /tmp/dvcstore
+    url = ../.dvcstore
+['remote "remotestore"']
+    url = s3://mlops-patent
+    endpointurl = https://d5f15f95dc1727bcac91e52cda851901.r2.cloudflarestorage.com/mlops-patent
