@@ -218,6 +218,7 @@ def train_cmd(
     num_trees: int = typer.Option(50, "--num-trees", "-t", help="Number of isolation trees"),
     max_depth: int = typer.Option(16, "--max-depth", "-m", help="Maximum tree depth"),
     seed: int = typer.Option(42, "--seed", "-s", help="Random seed"),
+    lsh_family: str = typer.Option("angle", "--lsh-family", "-f", help="LSH family: angle, l2"),
     params: Path = typer.Option(
         None, "--params", "-p", help="JSON file with additional model params"
     ),
@@ -230,7 +231,12 @@ def train_cmd(
 
     from patent.modeling.train import train_model
 
-    model_cfg = {"num_trees": num_trees, "max_depth": max_depth, "seed": seed}
+    model_cfg = {
+        "num_trees": num_trees,
+        "max_depth": max_depth,
+        "seed": seed,
+        "lsh_family": lsh_family,
+    }
     if params and params.exists():
         with open(params, "r") as f:
             model_cfg.update(json.load(f))

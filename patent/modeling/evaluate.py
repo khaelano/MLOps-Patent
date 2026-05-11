@@ -198,8 +198,8 @@ def convert_embeddings_to_memmap(
             first_batch = next(pq_file.iter_batches(batch_size=1, columns=[column]))
             embedding_dim = len(first_batch.column(0)[0])
 
-    mmap = np.memmap(
-        str(output_path), dtype=np.float32, mode="w+", shape=(total_rows, embedding_dim)
+    mmap = np.memmap(  # ty: ignore[no-matching-overload]
+        str(output_path), dtype=np.dtype(np.float32), mode="w+", shape=(total_rows, embedding_dim)
     )
     row_offset = 0
     for pq_path in embeddings_paths:
@@ -212,6 +212,7 @@ def convert_embeddings_to_memmap(
             row_offset = end
     mmap.flush()
     del mmap
+    assert embedding_dim is not None
     return embedding_dim, total_rows
 
 
@@ -479,44 +480,34 @@ def evaluate_subsampling_stability(
     score_paths = []
     model_names = []
 
+    mmap_path = temp_dir / "stability_embeddings.mmap"
+    embedding_dim, _ = convert_embeddings_to_memmap(embeddings_paths, mmap_path)
+
+    embeddings = np.memmap(
+        str(mmap_path), dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
+    )
+
     with mute_logging():
         for split_idx in range(n_splits):
             split_seed = int(rng.integers(0, 2**31 - 1))
             subset_indices = rng.choice(total_rows, size=subsample_size, replace=False)
+            subset_embeddings = np.array(embeddings[subset_indices], dtype=np.float32)
 
             baseline_path = temp_dir / f"depths_split{split_idx}.npy"
 
             model = LSHIForest(num_trees=num_trees, max_depth=max_depth, seed=split_seed)
-            model._build_forest(embeddings_paths, column="embedding")
-
-            subset_rows_int = int(subset_indices.size)
-            forest_mmap = model.forest_mmap
-            if forest_mmap is None or forest_mmap.size == 0:
-                logger.error(f"Split {split_idx}: forest is empty, skipping")
-                continue
-
-            subset_mmap_path = temp_dir / f"forest_split{split_idx}.dat"
-            subset_mmap = np.memmap(
-                subset_mmap_path,
-                dtype=model._hash_dtype,
-                mode="w+",
-                shape=(model.meta.num_trees, subset_rows_int),
+            model.build_forest_from_embeddings(
+                subset_embeddings,
+                baseline_output_path=baseline_path,
             )
-            for t in range(model.meta.num_trees):
-                subset_mmap[t] = forest_mmap[t, subset_indices]
-            subset_mmap.flush()
-
-            model.forest_mmap = subset_mmap
-            model.meta.num_rows = subset_rows_int
-            model.meta.is_sorted = True
-
-            model._calculate_baseline(baseline_output_path=baseline_path)
 
             score_paths.append(str(baseline_path))
             model_names.append(f"subsample_{split_idx}")
 
+    del embeddings
+
     if len(score_paths) < 2:
-        shutil.rmtree(temp_dir)
+        shutil.rmtree(temp_dir, ignore_errors=True)
         raise RuntimeError(f"Only {len(score_paths)} successful splits (need >= 2)")
 
     metrics = calculate_stability_metrics_n(
@@ -527,10 +518,10 @@ def evaluate_subsampling_stability(
         aggregation="mean",
     )
 
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
     metrics["subsample_ratio"] = subsample_ratio
     metrics["n_splits"] = n_splits
-
-    shutil.rmtree(temp_dir)
 
     return metrics
 
@@ -558,9 +549,9 @@ def export_top_anomalies(
     columns = ["id", "title", "categories", "update_date"]
     available = [c for c in columns if c in metadata.columns]
 
-    records = []
+    records: list[dict[str, Any]] = []
     for idx in top_indices:
-        record = {"anomaly_score": float(scores[idx])}
+        record: dict[str, Any] = {"anomaly_score": float(scores[idx])}
         for col in available:
             val = metadata.iloc[idx][col]
             if isinstance(val, (np.integer,)):
