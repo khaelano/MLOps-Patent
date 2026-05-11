@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import shutil
 import tempfile
 import time
 import tracemalloc
@@ -413,9 +414,58 @@ class LSHIForest:
         chunk_size: int = 100_000,
     ) -> None:
         self.chunk_size = chunk_size
-        self._build_forest_pq(embeddings_paths, column)
-        if baseline_output_path is not None:
-            self._calculate_baseline_pq(embeddings_paths, baseline_output_path, column)
+        embeddings_paths = [Path(p) for p in embeddings_paths]
+
+        logger.info("Streaming Parquet to temporary memmap (1 pass)...")
+        t_start = time.perf_counter()
+
+        total_rows = 0
+        embedding_dim = None
+        for p in embeddings_paths:
+            pf = pq.ParquetFile(p)
+            total_rows += pf.metadata.num_rows
+            if embedding_dim is None:
+                first_batch = next(pf.iter_batches(batch_size=1, columns=[column]))
+                embedding_dim = len(first_batch.column(0)[0])
+
+        embed_temp_dir = Path(tempfile.mkdtemp())
+        mmap_path = embed_temp_dir / "embeddings.mmap"
+        try:
+            mmap = np.memmap(  # ty: ignore[no-matching-overload]
+                str(mmap_path),
+                dtype=np.float32,
+                mode="w+",
+                shape=(total_rows, embedding_dim),
+            )
+            row_offset = 0
+            for p in embeddings_paths:
+                pf = pq.ParquetFile(p)
+                for batch in pf.iter_batches(batch_size=chunk_size, columns=[column]):
+                    flat = batch.column(0).flatten().to_numpy(zero_copy_only=False)
+                    arr = flat.reshape(-1, embedding_dim).astype(np.float32, copy=False)
+                    n = len(arr)
+                    mmap[row_offset : row_offset + n] = arr
+                    row_offset += n
+            mmap.flush()
+            del mmap
+
+            delta = time.perf_counter() - t_start
+            logger.success(
+                f"Parquet → memmap in {delta:.2f}s ({total_rows} rows × {embedding_dim})"
+            )
+
+            embeddings = np.memmap(  # ty: ignore[no-matching-overload]
+                str(mmap_path),
+                dtype=np.float32,
+                mode="r",
+                shape=(total_rows, embedding_dim),
+            )
+            self._build_forest_array(embeddings)
+            if baseline_output_path is not None:
+                self._calculate_baseline_array(embeddings, baseline_output_path)
+            del embeddings
+        finally:
+            shutil.rmtree(embed_temp_dir, ignore_errors=True)
 
     def build_forest_from_embeddings(
         self,
