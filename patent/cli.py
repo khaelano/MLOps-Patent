@@ -4,14 +4,19 @@ from loguru import logger
 import pandas as pd
 import typer
 
-from patent.config import INTERIM_DATA_DIR, PROCESSED_DATA_DIR, RAW_DATA_DIR
+from patent.config import INTERIM_DATA_DIR, MODELS_DIR, PROCESSED_DATA_DIR, RAW_DATA_DIR
 from patent.dataset.ingest import (
     download_kaggle_snapshot,
     extract_latest_update,
     fetch_oai_updates,
 )
-from patent.dataset.preprocess import clean_df, parse_oai_xml_file, parse_snapshot_json_file
-from patent.utils import get_last_update_date, get_vectors_from_files, set_last_update_date
+from patent.dataset.preprocess import (
+    clean_df,
+    parse_oai_xml_directory,
+    parse_oai_xml_file,
+    parse_snapshot_json_file,
+)
+from patent.utils import get_last_update_date, set_last_update_date
 
 app = typer.Typer(help="MLOps Patent Pipeline CLI", no_args_is_help=True)
 
@@ -93,18 +98,13 @@ def reserialize_data(
         output_path = INTERIM_DATA_DIR / "serialized" / out_name
 
     if is_json:
-        df = parse_snapshot_json_file(file_path)
+        parse_snapshot_json_file(file_path, output_path)
     else:
         if file_path.is_dir():
-            dfs = []
-            for xml_file in file_path.glob("**/*.xml"):
-                dfs.append(parse_oai_xml_file(xml_file))
-            df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
+            parse_oai_xml_directory(file_path, output_path)
         else:
-            df = parse_oai_xml_file(file_path)
+            parse_oai_xml_file(file_path, output_path)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(output_path, index=False)
     logger.info(f"Successfully serialized parsed data to {output_path}")
 
 
@@ -201,185 +201,169 @@ def embed_data(
     logger.info(f"Successfully serialized chunked feature embeddings to {output_path}")
 
 
-def reduce_embeddings_in_file(input_file: str, output_file: str, pca, batch_size: int = 50000):
-    """
-    Stream through an existing parquet file, apply PCA transformation to 'embedding',
-    and write to a new parquet file preserving all other columns.
-    """
-    import numpy as np
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    logger.info(f"Reducing embeddings in {input_file} -> {output_file}")
-
-    try:
-        parquet_file = pq.ParquetFile(input_file)
-    except Exception as e:
-        logger.error(f"Failed to open {input_file} for reduction: {e}")
-        return
-
-    # Create new schema, keeping everything identical but overriding the 'embedding' field type
-    fields = []
-    for field in parquet_file.schema_arrow:
-        if field.name == "embedding":
-            fields.append(pa.field("embedding", pa.list_(pa.float32())))
-        else:
-            fields.append(field)
-    new_schema = pa.schema(fields)
-
-    try:
-        with pq.ParquetWriter(output_file, new_schema) as writer:
-            for batch in parquet_file.iter_batches(batch_size=batch_size):
-                col = batch.column("embedding")
-                dim = (
-                    col.type.list_size
-                    if hasattr(col.type, "list_size")
-                    else len(col.flatten()) // len(col)
-                )
-                emb_np = (
-                    col.flatten()
-                    .to_numpy(zero_copy_only=False)
-                    .reshape(-1, dim)
-                    .astype(np.float32)
-                )
-
-                # Transform using the PCA model
-                reduced_emb = pca.transform(emb_np).astype(np.float32)
-
-                # Reconstruct PyArrow RecordBatch
-                arrays = []
-                for name in batch.schema.names:
-                    if name == "embedding":
-                        # Flatten reduced embeddings and specify variable-length list offsets
-                        flat_arr = pa.array(reduced_emb.flatten(), type=pa.float32())
-                        offsets = pa.array(
-                            np.arange(
-                                0,
-                                (len(reduced_emb) + 1) * pca.n_components,
-                                pca.n_components,
-                                dtype=np.int32,
-                            )
-                        )
-                        new_col = pa.ListArray.from_arrays(offsets, flat_arr)
-                        arrays.append(new_col)
-                    else:
-                        arrays.append(batch.column(name))
-
-                new_batch = pa.RecordBatch.from_arrays(arrays, schema=new_schema)
-                writer.write_batch(new_batch)
-
-        logger.success(f"Successfully wrote reduced embeddings to {output_file}")
-    except Exception as e:
-        logger.error(f"Failed to reduce embeddings during batch iteration: {e}")
+model_app = typer.Typer(help="Model training and evaluation commands", no_args_is_help=True)
+app.add_typer(model_app, name="model")
 
 
-@data_app.command("reduce")
-def reduce_data(
-    file_path: Path = typer.Argument(..., help="Path to the full-size embedded Parquet"),
-    output_path: Path = typer.Option(
-        None,
-        help="Path to dump reduced artifact.",
+@model_app.command("train")
+def train_cmd(
+    data: Path = typer.Argument(
+        PROCESSED_DATA_DIR,
+        help="Directory containing .parquet embeddings (default: data/processed/)",
     ),
-    n_components: int = typer.Option(128, help="Number of PCA components to keep"),
-    batch_size: int = typer.Option(50000, help="Row count per chunk to process sequentially"),
-    model_path: Path = typer.Option(
-        "models/pca_model.joblib", help="Path to save/load the PCA model"
+    output: Path = typer.Argument(
+        MODELS_DIR,
+        help="Output directory for the model (default: models/)",
     ),
-    force_train: bool = typer.Option(
-        False, "--force-train", help="Force retrain the PCA model even if it exists"
+    num_trees: int = typer.Option(50, "--num-trees", "-t", help="Number of isolation trees"),
+    max_depth: int = typer.Option(16, "--max-depth", "-m", help="Maximum tree depth"),
+    seed: int = typer.Option(42, "--seed", "-s", help="Random seed"),
+    params: Path = typer.Option(
+        None, "--params", "-p", help="JSON file with additional model params"
+    ),
+    mlflow_experiment: str = typer.Option(
+        None, "--mlflow-experiment", help="MLflow experiment name"
     ),
 ):
-    """Reduce the dimensionality of embeddings in a Parquet file using PCA."""
-    import joblib
-
-    from patent.modeling.pca.train import (
-        train_pca_model,
-    )
-
-    if not file_path.exists():
-        logger.error(f"File not found: {file_path}")
-        raise typer.Exit(1)
-
-    if not output_path:
-        output_path = PROCESSED_DATA_DIR / f"{file_path.stem}_reduced.parquet"
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if model_path.exists() and not force_train:
-        logger.info(f"Loading existing PCA model from {model_path}")
-        pca = joblib.load(str(model_path))
-    else:
-        logger.info("Training new PCA model...")
-        vectors = get_vectors_from_files([str(file_path)])
-        if len(vectors) == 0:
-            logger.error("No embeddings found to train PCA.")
-            raise typer.Exit(1)
-        pca = train_pca_model(
-            vectors,
-            n_components=n_components,
-            batch_size=batch_size,
-            model_save_path=str(model_path),
-        )
-
-    reduce_embeddings_in_file(str(file_path), str(output_path), pca, batch_size=batch_size)
-
-
-train_app = typer.Typer(help="Modeling and training commands", no_args_is_help=True)
-app.add_typer(train_app, name="train")
-
-
-@train_app.command("tune")
-def tune_model(
-    file_paths: list[str] = typer.Argument(
-        ..., help="List of file paths to parquet features to train on"
-    ),
-):
+    """Train an LSHiForest model on processed embeddings."""
     import json
 
-    import joblib
-    import mlflow
+    from patent.modeling.train import train_model
 
-    from patent.config import MODELS_DIR
-    from patent.modeling.iforest.train import optimize_iforest
+    model_cfg = {"num_trees": num_trees, "max_depth": max_depth, "seed": seed}
+    if params and params.exists():
+        with open(params, "r") as f:
+            model_cfg.update(json.load(f))
 
-    # 1. Fetch vectors
-    vectors = get_vectors_from_files(file_paths)
+    ctx = {"experiment_name": mlflow_experiment} if mlflow_experiment else None
 
-    if len(vectors) == 0:
-        logger.error("No embeddings found in the provided files.")
+    output.mkdir(parents=True, exist_ok=True)
+
+    train_model(
+        embeddings_dir=data,
+        output_dir=output,
+        model_params=model_cfg,
+        mlflow_context=ctx,
+    )
+
+
+@model_app.command("evaluate")
+def evaluate_cmd(
+    model: Path = typer.Argument(
+        MODELS_DIR / "model.lshif",
+        help="Path to the trained .lshif model file",
+    ),
+    data: Path = typer.Argument(
+        PROCESSED_DATA_DIR,
+        help="Directory containing .parquet embeddings (default: data/processed/)",
+    ),
+    output: Path = typer.Argument(
+        MODELS_DIR / "evaluation.json",
+        help="Output path for evaluation metrics",
+    ),
+    top_k: int = typer.Option(100, "--top-k", "-k", help="Number of top anomalies to export"),
+    do_subsampling: bool = typer.Option(
+        False, "--do-subsampling", help="Enable bootstrap subsampling stability (expensive)"
+    ),
+    subsample_splits: int = typer.Option(
+        5, "--subsample-splits", help="Number of bootstrap splits for subsampling"
+    ),
+    n_workers: int = typer.Option(
+        None,
+        "--n-workers",
+        "-w",
+        help="Number of parallel workers for seed stability (default: auto)",
+    ),
+    mlflow_experiment: str = typer.Option(
+        None, "--mlflow-experiment", help="MLflow experiment name"
+    ),
+):
+    """Evaluate model stability, score distribution, centroid correlation, and export top anomalies."""
+    from patent.modeling.train import evaluate_model
+
+    ctx = {"experiment_name": mlflow_experiment} if mlflow_experiment else None
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    evaluate_model(
+        model_path=model,
+        embeddings_dir=data,
+        output_path=output,
+        mlflow_context=ctx,
+        top_k=top_k,
+        do_subsampling=do_subsampling,
+        subsample_splits=subsample_splits,
+        n_workers=n_workers,
+    )
+
+
+@app.command("pipeline")
+def pipeline_cmd(
+    raw: Path = typer.Option(
+        None, "--raw", "-r", help="Raw XML/JSON file or directory to start from"
+    ),
+    skip_init: bool = typer.Option(False, "--skip-init", help="Skip data download step"),
+    force: bool = typer.Option(False, "--force", "-f", help="Re-run steps even if outputs exist"),
+):
+    """Run the full pipeline: reserialize → clean → embed → train → evaluate."""
+    snapshot_file = RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json"
+    updates_dir = RAW_DATA_DIR / "updates"
+
+    if not skip_init and not snapshot_file.exists():
+        logger.info("No snapshot found. Run 'data init' first or use --skip-init.")
         raise typer.Exit(1)
 
-    # Setup MLflow
-    experiment = mlflow.set_experiment("IForest-Novelty")
+    sources = []
+    if raw:
+        sources.append((raw, raw.suffix == ".json"))
+    else:
+        if snapshot_file.exists():
+            sources.append((snapshot_file, True))
+        if updates_dir.exists():
+            for subdir in sorted(updates_dir.iterdir()):
+                if subdir.is_dir():
+                    sources.append((subdir, False))
 
-    # 2. Optimize and train
-    result = optimize_iforest(
-        vectors, run_name="Isolation Forest CLI Hypertune", experiment_id=experiment.experiment_id
-    )
-    best_params = result["params"]
-    model = result["model"]
-    evaluation = result["metrics"]
+    if not sources:
+        logger.error("No raw data sources found.")
+        raise typer.Exit(1)
 
-    # 3. Dump params, metrics and model locally
-    import datetime
+    serialized_dir = INTERIM_DATA_DIR / "serialized"
+    cleaned_dir = INTERIM_DATA_DIR / "cleaned"
 
-    run_timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    run_dir = MODELS_DIR / f"run_{run_timestamp}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+    for raw_path, is_json in sources:
+        out_name = (
+            f"{raw_path.name}.parquet"
+            if raw_path.is_dir()
+            else raw_path.with_suffix(".parquet").name
+        )
+        serialized_path = serialized_dir / out_name
+        cleaned_path = cleaned_dir / out_name
+        processed_path = PROCESSED_DATA_DIR / out_name
 
-    param_out_path = run_dir / "best_if_params.json"
-    with open(param_out_path, "w") as f:
-        json.dump(best_params, f, indent=4)
+        if force or not serialized_path.exists():
+            logger.info(f"--- Reserialize: {raw_path} ---")
+            reserialize_data(file_path=raw_path, output_path=serialized_path, is_json=is_json)
 
-    eval_out_path = run_dir / "evaluation.json"
-    with open(eval_out_path, "w") as f:
-        json.dump(evaluation, f, indent=4)
+        if force or not cleaned_path.exists():
+            logger.info(f"--- Clean: {serialized_path} ---")
+            clean_data(file_path=serialized_path, output_path=cleaned_path)
 
-    model_out_path = run_dir / "isolation_forest.pkl"
-    joblib.dump(model, model_out_path)
+        if force or not processed_path.exists():
+            logger.info(f"--- Embed: {cleaned_path} ---")
+            embed_data(file_path=cleaned_path, output_path=processed_path)
 
-    logger.success(f"Dumped model, metrics, and parameters to {run_dir} and MLFlow!")
+    model_path = MODELS_DIR / "model.lshif"
+    if force or not model_path.exists():
+        logger.info("--- Train ---")
+        train_cmd(data=PROCESSED_DATA_DIR, output=MODELS_DIR)
+
+    eval_path = MODELS_DIR / "evaluation.json"
+    if force or not eval_path.exists():
+        logger.info("--- Evaluate ---")
+        evaluate_cmd(model=model_path, data=PROCESSED_DATA_DIR, output=eval_path)
+
+    logger.success("Pipeline completed.")
 
 
 if __name__ == "__main__":

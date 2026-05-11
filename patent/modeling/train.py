@@ -1,6 +1,8 @@
 from contextlib import nullcontext
 import json
 from pathlib import Path
+import shutil
+import tempfile
 import time
 from typing import Any
 
@@ -10,9 +12,17 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from patent.config import CHUNK_SIZE
-from patent.modeling.evaluate import evaluate_params
+from patent.modeling.evaluate import (
+    analyze_score_distribution,
+    convert_embeddings_to_memmap,
+    distance_to_centroid_correlation,
+    evaluate_params,
+    evaluate_subsampling_stability,
+    export_top_anomalies,
+    score_memmap_chunked,
+)
 from patent.modeling.lsh_iforest import LSHIForest
-from patent.utils import flatten_dict
+from patent.utils import flatten_dict, load_parquet_metadata
 
 
 def parquet_to_memmap(
@@ -135,6 +145,10 @@ def evaluate_model(
     embeddings_dir: str | Path,
     output_path: str | Path = "evaluation.json",
     mlflow_context: dict[str, Any] | None = None,
+    top_k: int = 100,
+    do_subsampling: bool = False,
+    subsample_splits: int = 5,
+    n_workers: int | None = None,
 ) -> dict[str, Any]:
     logger.info(f"Evaluating model {model_path}")
     embeddings_dir = Path(embeddings_dir)
@@ -144,20 +158,84 @@ def evaluate_model(
     num_trees = model.meta.num_trees
     max_depth = model.meta.max_depth
 
-    embeddings_paths = [f for f in embeddings_dir.iterdir() if f.is_file()]
-    eval = evaluate_params(embeddings_paths, num_trees=num_trees, max_depth=max_depth)
-    flattened_eval = flatten_dict(eval["summary"])
+    embeddings_paths = [str(p) for p in sorted(embeddings_dir.glob("*.parquet"))]
+    if not embeddings_paths:
+        raise FileNotFoundError(f"No .parquet files found in {embeddings_dir}")
 
-    with open(output_path, "w") as f:
-        json.dump(flattened_eval, f)
+    mlflow_run = (
+        mlflow.start_run(**mlflow_context) if mlflow_context is not None else nullcontext()
+    )
+    with mlflow_run:
+        eval_result: dict[str, Any] = {}
+        embed_temp_dir = Path(tempfile.mkdtemp())
 
-    if mlflow_context:
-        with mlflow.start_run(**mlflow_context):
-            mlflow.log_metrics(flattened_eval)
+        try:
+            logger.info("Running seed-based stability evaluation...")
+            seed_stability = evaluate_params(
+                [Path(p) for p in embeddings_paths],
+                num_trees=num_trees,
+                max_depth=max_depth,
+                n_workers=n_workers,
+            )
+            eval_result["stability"] = seed_stability["summary"]
+
+            logger.info("Converting embeddings to shared memmap...")
+            mmap_path = embed_temp_dir / "embeddings.mmap"
+            embedding_dim, total_rows = convert_embeddings_to_memmap(embeddings_paths, mmap_path)
+
+            logger.info("Loading metadata for evaluation...")
+            metadata = load_parquet_metadata(embeddings_paths)
+
+            if total_rows == 0:
+                logger.warning("No embeddings found, skipping remaining evaluations")
+            else:
+                logger.info("Computing anomaly scores via chunked memmap scoring...")
+                embeddings_mmap = np.memmap(
+                    mmap_path, dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
+                )
+                scores = score_memmap_chunked(model, embeddings_mmap, total_rows)
+
+                logger.info("Analyzing score distribution...")
+                eval_result["score_distribution"] = analyze_score_distribution(scores)
+
+                logger.info("Computing distance-to-centroid correlation...")
+                eval_result["centroid_correlation"] = distance_to_centroid_correlation(
+                    embeddings_paths, scores
+                )
+
+                logger.info(f"Exporting top {top_k} anomalies...")
+                top_path = Path(output_path).parent / "top_anomalies.json"
+                export_top_anomalies(scores, metadata, top_path, top_k=top_k)
+                eval_result["top_anomalies_path"] = str(top_path)
+
+            if do_subsampling:
+                logger.info(f"Running subsampling stability ({subsample_splits} splits)...")
+                subsample_stability = evaluate_subsampling_stability(
+                    [Path(p) for p in embeddings_paths],
+                    num_trees=num_trees,
+                    max_depth=max_depth,
+                    n_splits=subsample_splits,
+                )
+                eval_result["subsampling_stability"] = subsample_stability["summary"]
+
+        finally:
+            shutil.rmtree(embed_temp_dir, ignore_errors=True)
+
+        flattened_eval = flatten_dict(eval_result)
+        with open(output_path, "w") as f:
+            json.dump(flattened_eval, f, indent=2)
+
+        if mlflow_context:
+            mlflow.log_metrics(
+                {k: v for k, v in flattened_eval.items() if isinstance(v, (int, float))}
+            )
             mlflow.log_artifact(str(output_path))
+            top_path = Path(output_path).parent / "top_anomalies.json"
+            if top_path.exists():
+                mlflow.log_artifact(str(top_path))
 
     end_time = time.perf_counter() - start_time
     logger.success(f"Model evaluated in {end_time:.2f}s.")
     logger.success(f"Evaluation metrics saved at {output_path}.")
 
-    return eval
+    return eval_result

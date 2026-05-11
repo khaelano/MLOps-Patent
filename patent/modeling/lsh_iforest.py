@@ -15,6 +15,7 @@ import mlflow
 from mlflow.models import infer_signature
 import numpy as np
 import pyarrow.parquet as pq
+import zstandard
 
 from patent.utils import byte_to_mbyte
 
@@ -47,6 +48,9 @@ class LSHIFMeta:
     seed: int = 42
     c_n: float | None = None
     is_sorted: bool = False
+    hash_bits: int = 64
+    bucket_bits: int = 4
+    format_version: int = 1
 
 
 class LSHIForest:
@@ -60,7 +64,7 @@ class LSHIForest:
         seed: int = 42,
     ) -> None:
         if max_depth > 16:
-            err_msg = "max_depth cannot exceed 16 when using 64-bit hashes with 4-bit buckets."
+            err_msg = "max_depth cannot exceed 16 when using 32-bit hashes with 2-bit buckets."
             logger.error(err_msg)
             raise ValueError(err_msg)
 
@@ -71,16 +75,28 @@ class LSHIForest:
             num_trees=num_trees,
             max_depth=max_depth,
             seed=seed,
+            hash_bits=32,
+            bucket_bits=2,
+            format_version=2,
         )
 
         self.model_path: Path = Path(tempfile.mkdtemp()) / "model.lshif"
         self.forest_mmap: np.memmap | None = None
         self.projections: list[np.ndarray] | None = None
+        self._tempfile: Path | None = None
 
         logger.debug(
             f"Initialized LSHIForest: num_trees={num_trees}, "
             f"max_depth={max_depth}, chunk_size={chunk_size}, seed={seed}"
         )
+
+    def __del__(self) -> None:
+        if self._tempfile and os.path.exists(self._tempfile):
+            os.unlink(self._tempfile)
+
+    @property
+    def _hash_dtype(self) -> type:
+        return np.uint32 if self.meta.hash_bits == 32 else np.uint64
 
     def _dump_meta(self, output_path: Path | str) -> None:
         meta_str = json.dumps(asdict(self._loaded_meta()))
@@ -105,11 +121,11 @@ class LSHIForest:
         rng = np.random.default_rng(self.meta.seed + tree_idx)
         dim = self._loaded_meta().embedding_dim
         assert dim is not None
-        return rng.standard_normal((dim, 64)).astype("float32")
+        return rng.standard_normal((dim, self.meta.hash_bits)).astype("float32")
 
     def _compute_simhash(self, vectors: np.ndarray, projection_matrix: np.ndarray) -> np.ndarray:
         projected = np.dot(vectors, projection_matrix)
-        return np.packbits(projected > 0, axis=1).view(np.uint64).reshape(-1)
+        return np.packbits(projected > 0, axis=1).view(self._hash_dtype).reshape(-1)
 
     def _generate_signatures_for_tree(
         self, embeddings_mmap: np.memmap, projection_matrix: np.ndarray, chunk_size: int
@@ -117,7 +133,7 @@ class LSHIForest:
         meta = self._loaded_meta()
         assert meta.num_rows is not None
 
-        signatures = np.zeros(meta.num_rows, dtype=np.uint64)
+        signatures = np.zeros(meta.num_rows, dtype=self._hash_dtype)
         curr_idx = 0
 
         while curr_idx < meta.num_rows:
@@ -147,7 +163,7 @@ class LSHIForest:
             if not np.any(still_active):
                 break
 
-            shift = np.uint64(64 - (depth * 4))
+            shift = self._hash_dtype(meta.hash_bits - (depth * meta.bucket_bits))
             prefixes = sorted_sigs >> shift
 
             neighbor_eq = prefixes[:-1] == prefixes[1:]
@@ -273,14 +289,42 @@ class LSHIForest:
 
         loaded_meta = instance._loaded_meta()
         assert loaded_meta.num_rows is not None
+        assert loaded_meta.num_trees is not None
 
-        instance.forest_mmap = np.memmap(
-            str(model_path),
-            dtype="uint64",
-            mode="r",
-            offset=instance.HEADER_SIZE,
-            shape=(loaded_meta.num_trees, loaded_meta.num_rows),
-        )
+        if meta.format_version == 2:
+            with open(model_path, "rb") as f:
+                f.seek(cls.HEADER_SIZE)
+                comp_size = np.frombuffer(f.read(4), dtype=np.uint32)[0]
+                compressed = f.read(comp_size)
+
+            raw = zstandard.ZstdDecompressor().decompress(compressed)
+            flat = np.frombuffer(raw, dtype=np.uint32)
+            forest = cls._delta_decode(flat, loaded_meta.num_trees, loaded_meta.num_rows)
+
+            v2_temp = tempfile.NamedTemporaryFile(delete=False, suffix=".lshif")
+            v2_temp_path = Path(v2_temp.name)
+            v2_temp.close()
+
+            mmap_file = np.memmap(
+                str(v2_temp_path),
+                dtype=np.uint32,
+                mode="w+",
+                shape=(loaded_meta.num_trees, loaded_meta.num_rows),
+            )
+            mmap_file[:] = forest
+            mmap_file.flush()
+            instance.forest_mmap = mmap_file
+            instance._tempfile = v2_temp_path
+            logger.info(f"Decompressed model to temp file: {v2_temp_path}")
+        else:
+            instance.forest_mmap = np.memmap(
+                str(model_path),
+                dtype=instance._hash_dtype,
+                mode="r",
+                offset=cls.HEADER_SIZE,
+                shape=(loaded_meta.num_trees, loaded_meta.num_rows),
+            )
+
         instance.projections = [instance._get_hyperplanes(i) for i in range(loaded_meta.num_trees)]
 
         logger.success(
@@ -288,19 +332,59 @@ class LSHIForest:
         )
         return instance
 
-    def save_model(self, output_path_str: str | Path = "output.lshif") -> None:
+    def _delta_encode(self) -> np.ndarray:
+        assert self.meta.hash_bits == 32
+        assert self.forest_mmap is not None
+        first_vals = self.forest_mmap[:, 0].copy()
+        deltas = np.diff(self.forest_mmap, axis=1).ravel()
+        return np.concatenate([first_vals, deltas]).astype(np.uint32, copy=False)
+
+    @staticmethod
+    def _delta_decode(flat: np.ndarray, num_trees: int, num_rows: int) -> np.ndarray:
+        first_vals = flat[:num_trees]
+        deltas = flat[num_trees:].reshape(num_trees, num_rows - 1)
+        forest = np.empty((num_trees, num_rows), dtype=np.uint32)
+        forest[:, 0] = first_vals
+        forest[:, 1:] = first_vals[:, None] + np.cumsum(deltas, axis=1)
+        return forest
+
+    def save_model(
+        self, output_path_str: str | Path = "output.lshif", compress: bool = True
+    ) -> None:
         output_path = Path(output_path_str)
         logger.info(f"Saving LSHiForest model to {output_path}...")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if output_path.resolve() != self.model_path.resolve():
-            shutil.copy2(self.model_path, output_path)
+        meta = self._loaded_meta()
+
+        if (
+            compress
+            and meta.is_sorted
+            and meta.hash_bits == 32
+            and meta.num_rows
+            and meta.num_rows > 0
+        ):
+            meta.format_version = 2
+            flat = self._delta_encode()
+            compressed = zstandard.ZstdCompressor(level=3).compress(flat.tobytes())
+            with open(output_path, "wb") as f:
+                header = json.dumps(asdict(meta)).ljust(self.HEADER_SIZE).encode("utf-8")
+                f.write(header)
+                f.write(np.uint32(len(compressed)).tobytes())
+                f.write(compressed)
+            logger.info(f"Compressed forest: {len(compressed)} bytes (delta+zstd)")
+        else:
+            meta.format_version = 1
+            if output_path.resolve() != self.model_path.resolve():
+                shutil.copy2(self.model_path, output_path)
+                with open(output_path, "r+b") as f:
+                    header = json.dumps(asdict(meta)).ljust(self.HEADER_SIZE).encode("utf-8")
+                    f.write(header)
 
         if mlflow.active_run():
             logger.debug("Logging model to MLflow...")
-
             input_example = np.random.randn(30, 384).astype("float32")
             output_example = self.score(input_example)
-
             mlflow.pyfunc.log_model(
                 name="lshiforest",
                 python_model=LSHIFWrapper(),
@@ -347,7 +431,7 @@ class LSHIForest:
 
         signatures = np.memmap(
             self.model_path,
-            dtype="uint64",
+            dtype=self._hash_dtype,
             mode="w+",
             offset=self.HEADER_SIZE,
             shape=(self.meta.num_trees, total_rows),
@@ -407,6 +491,47 @@ class LSHIForest:
         self._build_forest(embeddings_paths, column, chunk_size)
         self._calculate_baseline(baseline_output_path)
 
+    def build_forest_from_embeddings(
+        self,
+        embeddings: np.ndarray,
+        baseline_output_path: str | Path | None = None,
+        chunk_size: int = 100_000,
+    ):
+        total_rows, embedding_dim = embeddings.shape
+
+        self.meta.embedding_dim = embedding_dim
+        self.meta.num_rows = total_rows
+
+        projections_list = [self._get_hyperplanes(i) for i in range(self.meta.num_trees)]
+        self.projections = projections_list
+
+        signatures = np.memmap(
+            self.model_path,
+            dtype=self._hash_dtype,
+            mode="w+",
+            offset=self.HEADER_SIZE,
+            shape=(self.meta.num_trees, total_rows),
+        )
+
+        curr_idx = 0
+        for start in range(0, total_rows, chunk_size):
+            end = min(start + chunk_size, total_rows)
+            batch = embeddings[start:end]
+            if batch.dtype != np.float32:
+                batch = batch.astype(np.float32)
+
+            slice_end = curr_idx + batch.shape[0]
+            for tree_idx in range(self.meta.num_trees):
+                packed_signature = self._compute_simhash(batch, projections_list[tree_idx])
+                signatures[tree_idx, curr_idx:slice_end] = packed_signature
+            curr_idx = slice_end
+
+        signatures.flush()
+        self.forest_mmap = signatures
+
+        if baseline_output_path is not None:
+            self._calculate_baseline(baseline_output_path)
+
     def score(self, new_embeddings: np.ndarray, normalize: bool = True) -> np.ndarray:
         if self.forest_mmap is None or self.projections is None:
             err_msg = "Database signatures are not loaded."
@@ -447,8 +572,9 @@ class LSHIForest:
             right_sigs = tree_db_sigs[idx_right]
             left_sigs = tree_db_sigs[idx_left]
 
-            diff_right = np.where(valid_right, new_sigs ^ right_sigs, ~np.uint64(0))
-            diff_left = np.where(valid_left, new_sigs ^ left_sigs, ~np.uint64(0))
+            sentinel = ~self._hash_dtype(0)
+            diff_right = np.where(valid_right, new_sigs ^ right_sigs, sentinel)
+            diff_left = np.where(valid_left, new_sigs ^ left_sigs, sentinel)
 
             min_diff = np.minimum(diff_right, diff_left)
 
@@ -459,7 +585,7 @@ class LSHIForest:
                 if not np.any(active_mask):
                     break
 
-                shift = np.uint64(64 - (depth * 4))
+                shift = self._hash_dtype(meta.hash_bits - (depth * meta.bucket_bits))
                 isolated = (min_diff[active_mask] >> shift) > 0
 
                 if np.any(isolated):

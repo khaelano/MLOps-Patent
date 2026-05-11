@@ -3,6 +3,7 @@ from typing import Any
 
 from loguru import logger
 import numpy as np
+import pandas as pd
 import pyarrow.parquet as pq
 
 from patent.config import RAW_DATA_DIR
@@ -92,4 +93,32 @@ def get_vectors_from_files(file_paths: list[str], target_dtype=np.float32) -> np
 
     result = np.vstack(embeddings_blocks)
     logger.info(f"Loaded {result.shape[0]} embeddings of dimension {result.shape[1]}")
+    return result
+
+
+def load_parquet_metadata(file_paths: list[str]) -> pd.DataFrame:
+    metadata_columns = ["id", "title", "categories", "update_date"]
+    blocks = []
+
+    for f in file_paths:
+        logger.debug(f"Loading metadata from {f}")
+        try:
+            parquet_file = pq.ParquetFile(f)
+            available = [c for c in metadata_columns if c in parquet_file.schema.names]
+            if not available:
+                logger.warning(f"No metadata columns found in {f}")
+                continue
+
+            for batch in parquet_file.iter_batches(batch_size=50000, columns=available):
+                blocks.append(batch.to_pandas())
+
+        except Exception as e:
+            logger.error(f"Failed to load metadata from {f}: {e}")
+
+    if not blocks:
+        logger.warning("No metadata found")
+        return pd.DataFrame()
+
+    result = pd.concat(blocks, ignore_index=True)
+    logger.info(f"Loaded metadata for {len(result)} rows")
     return result
