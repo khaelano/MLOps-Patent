@@ -146,15 +146,15 @@ def embed_data(
         help="Path to dump embedded artifact. Defaults to data/processed/[filename].parquet",
     ),
     embedder_spec: str = typer.Option(
-        "sentence-transformers:all-MiniLM-L6-v2",
+        "embed-anything-onnx:AllMiniLML6V2Q",
         "--embedder",
-        help="Embedder spec: '<protocol>:<model>' (e.g. 'sentence-transformers:all-MiniLM-L6-v2')",
+        help="Embedder spec: '<protocol>:<model>' (e.g. 'embed-anything-onnx:AllMiniLML6V2Q')",
     ),
     batch_size: int = typer.Option(50000, help="Row count per chunk to process sequentially"),
 ):
     """Read a cleaned Parquet artifact sequentially in chunks using PyArrow to
     minimize memory footprint.  Generates text embeddings for titles using
-    a pluggable embedder (default: sentence-transformers), and streams the
+    a pluggable embedder (default: embed-anything-onnx), and streams the
     resulting features iteratively into a new Parquet file.
     """
     import pyarrow as pa

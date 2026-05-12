@@ -1,9 +1,9 @@
+from pathlib import Path
 
 from loguru import logger
 
 from patent.cli import clean_data, embed_data, reserialize_data
 from patent.config import INTERIM_DATA_DIR, PROCESSED_DATA_DIR, RAW_DATA_DIR
-from pathlib import Path
 
 
 def main():
@@ -67,7 +67,7 @@ def main():
             embed_data(
                 file_path=cleaned_path,
                 output_path=processed_path,
-                embedder_spec="sentence-transformers:all-MiniLM-L6-v2",
+                embedder_spec="embed-anything-onnx:AllMiniLML6V2Q",
                 batch_size=50000,
             )
         else:
