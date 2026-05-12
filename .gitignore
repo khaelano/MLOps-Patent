@@ -188,8 +188,7 @@ cython_debug/
 .pypirc
 
 # Temp directory
-.tmp_cache/
-.project_temp
+.tmp/
 
 # Local dvc store
 .dvcstore/
@@ -197,3 +196,6 @@ cython_debug/
 # Editor configurations
 .vscode/
 /models
+
+# dev mlflow directory
+.mlflow/

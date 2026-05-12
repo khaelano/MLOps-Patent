@@ -235,11 +235,11 @@ class LSHiForest:
             Paths to Parquet files with an ``"embedding"`` column.
         """
         import shutil
-        import tempfile
 
+        from patent.config import project_tempdir
         from patent.utils import convert_parquet_to_memmap
 
-        tmpdir = Path(tempfile.mkdtemp())
+        tmpdir = project_tempdir()
         mmap_path = tmpdir / "fit_data.mmap"
         try:
             embedding_dim, total_rows = convert_parquet_to_memmap(paths, str(mmap_path))

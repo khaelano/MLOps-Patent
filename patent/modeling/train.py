@@ -2,7 +2,6 @@ from contextlib import nullcontext
 import json
 from pathlib import Path
 import shutil
-import tempfile
 import time
 from typing import Any
 
@@ -10,7 +9,7 @@ from loguru import logger
 import mlflow
 import numpy as np
 
-from patent.config import CHUNK_SIZE
+from patent.config import CHUNK_SIZE, project_tempdir
 from patent.lshiforest import LSHiForest
 from patent.modeling.evaluate import (
     analyze_score_distribution,
@@ -78,7 +77,7 @@ def train_model(
         raise FileNotFoundError(f"No .parquet files found in {embeddings_dir}")
 
     # ── Convert parquet → memmap ONCE, reuse for fit + baseline scoring ──
-    embed_temp_dir = Path(tempfile.mkdtemp())
+    embed_temp_dir = project_tempdir()
     mmap_path = embed_temp_dir / "embeddings.mmap"
     try:
         logger.info("Converting Parquet embeddings to memory-mapped array...")
@@ -145,7 +144,7 @@ def evaluate_model(
     )
     with mlflow_run:
         eval_result: dict[str, Any] = {}
-        embed_temp_dir = Path(tempfile.mkdtemp())
+        embed_temp_dir = project_tempdir()
 
         try:
             # ── Create the memmap ONCE, share with evaluate_params ──

@@ -2,13 +2,13 @@ from itertools import combinations
 import json
 from pathlib import Path
 import shutil
-import tempfile
 from typing import Any, Literal
 
 from loguru import logger
 import numpy as np
 from scipy.stats import kurtosis, pearsonr, skew, spearmanr
 
+from patent.config import project_tempdir
 from patent.lshiforest import LSHiForest
 from patent.utils import convert_parquet_to_memmap, mute_logging
 
@@ -203,7 +203,7 @@ def evaluate_params(
     import os
 
     seeds = [234, 223, 342, 122, 89]
-    temp_dir = Path(tempfile.mkdtemp())
+    temp_dir = project_tempdir()
 
     if shared_mmap is not None:
         mmap_path_str, total_rows, embedding_dim = shared_mmap
@@ -346,7 +346,7 @@ def distance_to_centroid_correlation(
         if total_rows == 0:
             return {}
 
-        embed_temp_dir = Path(tempfile.mkdtemp())
+        embed_temp_dir = project_tempdir()
         mmap_path = str(embed_temp_dir / "centroid.mmap")
         try:
             from patent.utils import convert_parquet_to_memmap
@@ -491,7 +491,7 @@ def evaluate_subsampling_stability(
         raise ValueError(f"Subsample size {subsample_size} too small for stability evaluation")
 
     rng = np.random.default_rng(seed)
-    temp_dir = Path(tempfile.mkdtemp())
+    temp_dir = project_tempdir()
 
     score_paths = []
     model_names = []
