@@ -11,6 +11,8 @@ from loguru import logger
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from patent.utils import open_maybe_zst
+
 _SCHEMA = pa.schema(
     [
         pa.field("id", pa.string()),
@@ -36,7 +38,7 @@ def _benchmark(name: str):
 
 def _iter_json_records(file_path: Path):
     """Yield dict records from a newline-delimited JSON file (Kaggle snapshot)."""
-    with open(file_path, "r", encoding="utf-8") as f:
+    with open_maybe_zst(file_path, "r", encoding="utf-8") as f:
         for line in f:
             if not line.strip():
                 continue
@@ -54,7 +56,7 @@ def _iter_json_records(file_path: Path):
 
 def _iter_xml_records(file_path: Path):
     """Yield dict records from a raw OAI-PMH XML file using a streaming parser."""
-    with open(file_path, "r", encoding="utf-8") as f:
+    with open_maybe_zst(file_path, "r", encoding="utf-8") as f:
         content = f.read()
 
     content = re.sub(r"<\?xml.*?\?>", "", content)
@@ -153,7 +155,7 @@ def parse_oai_xml_file(file_path: Path, output_path: Path, batch_size: int = 100
 
 def parse_oai_xml_directory(dir_path: Path, output_path: Path, batch_size: int = 100_000):
     """Stream-parse all XML files in a directory into a single Parquet file."""
-    xml_files = sorted(dir_path.glob("**/*.xml"))
+    xml_files = sorted(list(dir_path.glob("**/*.xml")) + list(dir_path.glob("**/*.xml.zst")))
     logger.info(f"Parsing {len(xml_files)} OAI-PMH XML files from {dir_path}")
 
     def _iter_all():
@@ -192,15 +194,23 @@ def clean_df(df):
     return df
 
 
-def embed(df, model, pool=None):
-    """Generate SentenceTransformers embeddings for titles and return processed DataFrame."""
+def embed(df, embedder):
+    """Generate embeddings for titles and return processed DataFrame.
 
-    logger.info(f"Encoding {len(df)} titles...")
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Must have a ``"title"`` column of strings.
+    embedder : patent.dataset.embedders.Embedder
+        Any embedder instance (e.g. from :func:`get_embedder`).
+
+    Returns
+    -------
+    pandas.DataFrame with an added ``"embedding"`` column (list of floats).
+    """
+    logger.info(f"Encoding {len(df)} titles with {embedder}...")
     with _benchmark("embed"):
-        if pool is not None:
-            embeddings = model.encode(df["title"].tolist(), pool=pool, show_progress_bar=True)
-        else:
-            embeddings = model.encode(df["title"].tolist(), show_progress_bar=True)
+        embeddings = embedder.encode(df["title"].tolist(), show_progress=True)
 
     logger.info("Successfully generated embeddings. Assigning to dataframe...")
     df["embedding"] = embeddings.tolist()

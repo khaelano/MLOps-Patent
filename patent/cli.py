@@ -12,6 +12,7 @@ from patent.dataset.ingest import (
 )
 from patent.dataset.preprocess import (
     clean_df,
+    embed,
     parse_oai_xml_directory,
     parse_oai_xml_file,
     parse_snapshot_json_file,
@@ -27,7 +28,7 @@ app.add_typer(data_app, name="data")
 @data_app.command("init")
 def init_data(
     output_path: Path = typer.Option(
-        RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json",
+        RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json.zst",
         "--output-path",
         "-o",
         help="File path for metadata storage",
@@ -90,10 +91,14 @@ def reserialize_data(
         raise typer.Exit(1)
 
     if not output_path:
+        # Strip .zst before replacing the data suffix for clean output naming
+        stem_name = file_path.name
+        if stem_name.endswith(".zst"):
+            stem_name = stem_name[:-4]
         out_name = (
-            f"{file_path.name}.parquet"
+            f"{stem_name}.parquet"
             if file_path.is_dir()
-            else file_path.with_suffix(".parquet").name
+            else Path(stem_name).with_suffix(".parquet").name
         )
         output_path = INTERIM_DATA_DIR / "serialized" / out_name
 
@@ -140,18 +145,22 @@ def embed_data(
         None,
         help="Path to dump embedded artifact. Defaults to data/processed/[filename].parquet",
     ),
-    model_name: str = typer.Option("all-MiniLM-L6-v2", help="SentenceTransformer model name"),
+    embedder_spec: str = typer.Option(
+        "sentence-transformers:all-MiniLM-L6-v2",
+        "--embedder",
+        help="Embedder spec: '<protocol>:<model>' (e.g. 'sentence-transformers:all-MiniLM-L6-v2')",
+    ),
     batch_size: int = typer.Option(50000, help="Row count per chunk to process sequentially"),
 ):
-    """
-    Read a cleaned Parquet artifact sequentially in chunks using PyArrow to minimize memory footprint.
-    Generates text embeddings for titles using a SentenceTransformer model (with multiprocessing support),
-    and streams the resulting features iteratively into a new Parquet file.
+    """Read a cleaned Parquet artifact sequentially in chunks using PyArrow to
+    minimize memory footprint.  Generates text embeddings for titles using
+    a pluggable embedder (default: sentence-transformers), and streams the
+    resulting features iteratively into a new Parquet file.
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    from patent.dataset.preprocess import embed
+    from patent.dataset.embedders import get_embedder
 
     if not file_path.exists():
         logger.error(f"File not found: {file_path}")
@@ -166,34 +175,28 @@ def embed_data(
     parquet_file = pq.ParquetFile(file_path)
     writer = None
 
-    from sentence_transformers import SentenceTransformer
-
-    logger.info(f"Loading SentenceTransformer model ('{model_name}')...")
+    logger.info(f"Loading embedder: {embedder_spec}")
     try:
-        model = SentenceTransformer(model_name)
+        embedder = get_embedder(embedder_spec)
     except Exception as e:
-        logger.error(f"Failed to load SentenceTransformer model: {e}")
+        logger.error(f"Failed to load embedder: {e}")
         raise typer.Exit(1)
-
-    pool = model.start_multi_process_pool()
 
     try:
         for i, batch in enumerate(parquet_file.iter_batches(batch_size=batch_size)):
             logger.info(f"Processing chunk {i + 1}...")
             df_chunk = batch.to_pandas()
 
-            # Pass the loaded model and pool to embed
-            df_embedded = embed(df_chunk, model, pool=pool)
+            df_embedded = embed(df_chunk, embedder)
 
             table = pa.Table.from_pandas(df_embedded)
 
-            # Initialize the writer with the schema from the first processed chunk
             if writer is None:
                 writer = pq.ParquetWriter(output_path, table.schema)
 
             writer.write_table(table)
     finally:
-        model.stop_multi_process_pool(pool)
+        embedder.stop_pool()
 
     if writer:
         writer.close()
@@ -215,10 +218,13 @@ def train_cmd(
         MODELS_DIR,
         help="Output directory for the model (default: models/)",
     ),
-    num_trees: int = typer.Option(50, "--num-trees", "-t", help="Number of isolation trees"),
-    max_depth: int = typer.Option(16, "--max-depth", "-m", help="Maximum tree depth"),
+    num_trees: int = typer.Option(200, "--num-trees", "-t", help="Number of isolation trees"),
+    max_depth: int = typer.Option(21, "--max-depth", "-m", help="Maximum tree depth"),
     seed: int = typer.Option(42, "--seed", "-s", help="Random seed"),
-    lsh_family: str = typer.Option("angle", "--lsh-family", "-f", help="LSH family: angle, l2"),
+    lsh_family: str = typer.Option("l2", "--lsh-family", "-f", help="LSH family: l2, angle"),
+    eta: float = typer.Option(
+        0.0, "--eta", help="Granularity: 0=local anomalies, 1=global anomalies"
+    ),
     params: Path = typer.Option(
         None, "--params", "-p", help="JSON file with additional model params"
     ),
@@ -232,10 +238,11 @@ def train_cmd(
     from patent.modeling.train import train_model
 
     model_cfg = {
-        "num_trees": num_trees,
+        "n_trees": num_trees,
         "max_depth": max_depth,
         "seed": seed,
-        "lsh_family": lsh_family,
+        "family": lsh_family,
+        "eta": eta,
     }
     if params and params.exists():
         with open(params, "r") as f:
@@ -312,7 +319,7 @@ def pipeline_cmd(
     force: bool = typer.Option(False, "--force", "-f", help="Re-run steps even if outputs exist"),
 ):
     """Run the full pipeline: reserialize → clean → embed → train → evaluate."""
-    snapshot_file = RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json"
+    snapshot_file = RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json.zst"
     updates_dir = RAW_DATA_DIR / "updates"
 
     if not skip_init and not snapshot_file.exists():
@@ -321,7 +328,7 @@ def pipeline_cmd(
 
     sources = []
     if raw:
-        sources.append((raw, raw.suffix == ".json"))
+        sources.append((raw, ".json" in raw.suffixes))
     else:
         if snapshot_file.exists():
             sources.append((snapshot_file, True))
@@ -338,10 +345,14 @@ def pipeline_cmd(
     cleaned_dir = INTERIM_DATA_DIR / "cleaned"
 
     for raw_path, is_json in sources:
+        # Strip .zst (and underlying .json/.xml) to derive a clean stem for output naming
+        stem_name = raw_path.name
+        if stem_name.endswith(".zst"):
+            stem_name = stem_name[:-4]
         out_name = (
-            f"{raw_path.name}.parquet"
+            f"{stem_name}.parquet"
             if raw_path.is_dir()
-            else raw_path.with_suffix(".parquet").name
+            else Path(stem_name).with_suffix(".parquet").name
         )
         serialized_path = serialized_dir / out_name
         cleaned_path = cleaned_dir / out_name

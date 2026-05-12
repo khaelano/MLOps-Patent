@@ -16,28 +16,18 @@ classifiers = [
     "License :: OSI Approved :: MIT License"
 ]
 dependencies = [
-    "ipython",
-    "joblib>=1.5.3",
-    "jupyterlab",
     "kaggle>=1.7.4.5",
     "loguru",
-    "matplotlib",
-    "mkdocs",
     "mlflow>=3.11.1",
-    "notebook",
     "numpy",
-    "optuna>=4.8.0",
-    "optuna-integration>=4.8.0",
     "pandas",
-    "pip",
     "pyarrow>=23.0.1",
-    "pytest",
     "python-dotenv",
     "requests>=2.33.1",
-    "scikit-learn",
     "sentence-transformers>=5.3.0",
     "tqdm",
     "typer",
+    "zstandard>=0.23.0",
 ]
 requires-python = "~=3.10.0"
 

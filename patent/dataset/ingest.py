@@ -5,6 +5,9 @@ import time
 
 from loguru import logger
 import requests
+import zstandard as zstd
+
+from patent.utils import open_maybe_zst
 
 OAI_BASE_URL = "https://oaipmh.arxiv.org/oai"
 
@@ -16,7 +19,7 @@ def extract_latest_update(snapshot_file: Path) -> str:
     logger.info(f"Scanning {snapshot_file} for the latest update date...")
     latest_date = ""
     try:
-        with open(snapshot_file, "r", encoding="utf-8") as f:
+        with open_maybe_zst(snapshot_file, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -37,12 +40,21 @@ def extract_latest_update(snapshot_file: Path) -> str:
 
 
 def download_kaggle_snapshot(output_path: Path) -> Path:
-    """Download the latest arXiv snapshot from Kaggle and return the path."""
+    """Download the latest arXiv snapshot from Kaggle, compress with zstd, and
+    return the path to the compressed file (``.json.zst``).
+    """
     if not output_path:
         raise ValueError("output_path must be provided")
 
     output_dir = output_path.parent
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Determine the uncompressed (temporary) JSON path
+    if output_path.suffix == ".zst":
+        uncompressed_path = output_path.with_suffix("")
+    else:
+        uncompressed_path = output_path
+        output_path = output_path.with_suffix(output_path.suffix + ".zst")
 
     if not output_path.exists():
         logger.info(f"Downloading Cornell-University/arxiv dataset to {output_dir}...")
@@ -59,8 +71,8 @@ def download_kaggle_snapshot(output_path: Path) -> Path:
             )
             # Kaggle extracts to arxiv-metadata-oai-snapshot.json by default
             default_extracted_file = output_dir / "arxiv-metadata-oai-snapshot.json"
-            if default_extracted_file != output_path and default_extracted_file.exists():
-                default_extracted_file.rename(output_path)
+            if default_extracted_file != uncompressed_path and default_extracted_file.exists():
+                default_extracted_file.rename(uncompressed_path)
             logger.info("Dataset downloaded successfully.")
         except OSError as e:
             logger.error("Kaggle credentials not found! Please configure your Kaggle credentials.")
@@ -68,6 +80,14 @@ def download_kaggle_snapshot(output_path: Path) -> Path:
         except Exception as e:
             logger.error(f"Failed to download from Kaggle: {e}")
             raise e
+
+        # Compress the raw JSON with zstd and remove the uncompressed file
+        logger.info(f"Compressing {uncompressed_path} with zstd...")
+        cctx = zstd.ZstdCompressor()
+        with open(uncompressed_path, "rb") as src, open(output_path, "wb") as dst:
+            cctx.copy_stream(src, dst)
+        uncompressed_path.unlink()
+        logger.info(f"Compressed snapshot saved to {output_path}")
 
     return output_path
 
@@ -108,10 +128,10 @@ def fetch_oai_updates(output_path: Path, from_date: str, to_date: str):
                 response = requests.get(OAI_BASE_URL, params=params, timeout=60, stream=True)
                 response.raise_for_status()
 
-                out_file = job_dir / f"{current_date_str}_page_{page}.xml"
+                out_file = job_dir / f"{current_date_str}_page_{page}.xml.zst"
                 record_count = 0
                 tail = ""
-                with open(out_file, "w", encoding="utf-8") as f_out:
+                with zstd.open(out_file, "wt", encoding="utf-8") as f_out:
                     for chunk in response.iter_content(chunk_size=65536, decode_unicode=True):
                         f_out.write(chunk)
                         record_count += chunk.count("<record")

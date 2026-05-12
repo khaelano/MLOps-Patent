@@ -21,11 +21,12 @@ def test_registry_inference(model_uri: str = "models:/LSH-IForest/2"):
 
     logger.info("Running inference...")
     predictions = model.predict(dummy_embeddings)
+    assert predictions is not None, "Model returned None"
 
     logger.info("=== Inference Results ===")
     for i, score in enumerate(predictions):
-        status = "ANOMALOUS" if score > 0.6 else "NORMAL"
-        logger.info(f"Sample {i + 1}: Score={score:.4f} | Status={status}")
+        status = "ANOMALOUS" if float(score) > 0.6 else "NORMAL"
+        logger.info(f"Sample {i + 1}: Score={float(score):.4f} | Status={status}")
 
     print("\nRaw Scores:", predictions)
 

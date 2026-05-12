@@ -9,43 +9,18 @@ from loguru import logger
 import numpy as np
 from scipy.stats import kurtosis, pearsonr, skew, spearmanr
 
-from patent.modeling.lsh_iforest import LSHIForest
-from patent.utils import mute_logging
-
-
-def calculate_stability_metrics(scores_path_a, scores_path_b, top_k=1000):
-    """
-    Efficiently compares two novelty score sets.
-    """
-    logger.info("Loading scores for stability check...")
-    scores_a = np.load(scores_path_a, mmap_mode="r")
-    scores_b = np.load(scores_path_b, mmap_mode="r")
-
-    logger.info("Calculating Spearman Rank Correlation...")
-    corr, _ = spearmanr(scores_a, scores_b)
-
-    logger.info(f"Calculating Jaccard Similarity for Top-{top_k}...")
-    top_indices_a = np.argpartition(scores_a, top_k)[:top_k]
-    top_indices_b = np.argpartition(scores_b, top_k)[:top_k]
-
-    set_a = set(top_indices_a)
-    set_b = set(top_indices_b)
-
-    intersection = len(set_a.intersection(set_b))
-    union = len(set_a.union(set_b))
-    jaccard = intersection / union
-
-    return {"spearman_correlation": corr, "jaccard_similarity": jaccard, "top_k": top_k}
+from patent.lshiforest import LSHiForest
+from patent.utils import convert_parquet_to_memmap, mute_logging
 
 
 def _spearman_sampled(scores_a, scores_b, sample_size=100_000, seed=42) -> float:
     """Compute Spearman on a random subset for efficiency."""
-    np.random.seed(seed)
+    rng = np.random.default_rng(seed)
     n = len(scores_a)
     if n <= sample_size:
         idx = np.arange(n)
     else:
-        idx = np.random.choice(n, size=sample_size, replace=False)
+        idx = rng.choice(n, size=sample_size, replace=False)
 
     mask = np.isfinite(scores_a[idx]) & np.isfinite(scores_b[idx])
     if np.sum(mask) < 10:
@@ -187,61 +162,23 @@ def convert_embeddings_to_memmap(
     column: str = "embedding",
     chunk_size: int = 200_000,
 ) -> tuple[int, int]:
-    import pyarrow.parquet as pq
-
-    embedding_dim = None
-    total_rows = 0
-    for pq_path in embeddings_paths:
-        pq_file = pq.ParquetFile(pq_path)
-        total_rows += pq_file.metadata.num_rows
-        if embedding_dim is None:
-            first_batch = next(pq_file.iter_batches(batch_size=1, columns=[column]))
-            embedding_dim = len(first_batch.column(0)[0])
-
-    mmap = np.memmap(  # ty: ignore[no-matching-overload]
-        str(output_path), dtype=np.dtype(np.float32), mode="w+", shape=(total_rows, embedding_dim)
-    )
-    row_offset = 0
-    for pq_path in embeddings_paths:
-        pq_file = pq.ParquetFile(pq_path)
-        for batch in pq_file.iter_batches(batch_size=chunk_size, columns=[column]):
-            flat = batch.column(0).flatten().to_numpy(zero_copy_only=False)
-            arr = flat.reshape(-1, embedding_dim).astype(np.float32, copy=False)
-            end = row_offset + len(arr)
-            mmap[row_offset:end] = arr
-            row_offset = end
-    mmap.flush()
-    del mmap
-    assert embedding_dim is not None
-    return embedding_dim, total_rows
-
-
-def score_memmap_chunked(
-    model: Any,
-    embeddings_mmap: np.ndarray,
-    total_rows: int,
-    chunk_size: int = 100_000,
-) -> np.ndarray:
-    scores = np.empty(total_rows, dtype=np.float32)
-    for start in range(0, total_rows, chunk_size):
-        end = min(start + chunk_size, total_rows)
-        batch = np.array(embeddings_mmap[start:end])
-        scores[start:end] = model.score(batch)
-    return scores
+    return convert_parquet_to_memmap(embeddings_paths, output_path, column)
 
 
 def _train_single_seed(args):
     """Build and save one seed model (runs in multiprocessing worker)."""
     seed, mmap_path, total_rows, embedding_dim, num_trees, max_depth, output_path = args
-    from patent.modeling.lsh_iforest import LSHIForest
+    from patent.lshiforest import LSHiForest
     from patent.utils import mute_logging
 
     embeddings = np.memmap(
         mmap_path, dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
     )
     with mute_logging():
-        model = LSHIForest(num_trees=num_trees, max_depth=max_depth, seed=seed)
-        model.build_forest_from_embeddings(embeddings, baseline_output_path=output_path)
+        model = LSHiForest(n_trees=num_trees, max_depth=max_depth, seed=seed)
+        model.fit(embeddings)
+        scores = model.score_chunked(embeddings, total_rows)
+        np.save(output_path, scores)
     return output_path
 
 
@@ -250,21 +187,36 @@ def evaluate_params(
     num_trees: int,
     max_depth: int,
     n_workers: int | None = None,
+    *,
+    shared_mmap: tuple[str, int, int] | None = None,
 ) -> dict[str, Any]:
+    """Seed-based stability: train *num_seeds* models and compare scores.
+
+    Parameters
+    ----------
+    shared_mmap : (path, total_rows, embedding_dim) | None
+        When provided, reuse an existing memmap instead of converting
+        *embeddings_paths* from scratch.  The caller retains ownership
+        of the memmap file.
+    """
     import concurrent.futures
     import os
 
     seeds = [234, 223, 342, 122, 89]
     temp_dir = Path(tempfile.mkdtemp())
 
-    if isinstance(embeddings_paths, (str, Path)):
-        embeddings_paths = [str(embeddings_paths)]
+    if shared_mmap is not None:
+        mmap_path_str, total_rows, embedding_dim = shared_mmap
+        mmap_path = Path(mmap_path_str)
     else:
-        embeddings_paths = [str(p) for p in embeddings_paths]
+        if isinstance(embeddings_paths, (str, Path)):
+            embeddings_paths = [str(embeddings_paths)]
+        else:
+            embeddings_paths = [str(p) for p in embeddings_paths]
 
-    logger.info("Pre-loading embeddings into shared memmap...")
-    mmap_path = temp_dir / "shared_embeddings.mmap"
-    embedding_dim, total_rows = convert_embeddings_to_memmap(embeddings_paths, mmap_path)
+        logger.info("Pre-loading embeddings into shared memmap...")
+        mmap_path = temp_dir / "shared_embeddings.mmap"
+        embedding_dim, total_rows = convert_embeddings_to_memmap(embeddings_paths, mmap_path)
 
     if n_workers is None:
         n_workers = min(len(seeds), max(1, (os.cpu_count() or 1) - 1))
@@ -289,18 +241,20 @@ def evaluate_params(
             with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as pool:
                 results = list(pool.map(_train_single_seed, task_args))
         for seed, path in zip(seeds, results):
-            score_paths.append(Path(path))
+            score_paths.append(str(path))
             model_names.append(f"lshif_{seed}")
     else:
         embeddings = np.memmap(
-            mmap_path, dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
+            str(mmap_path), dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
         )
         with mute_logging():
             for k in seeds:
                 baseline_path = temp_dir / f"depths_{k}.npy"
-                model = LSHIForest(num_trees=num_trees, max_depth=max_depth, seed=k)
-                model.build_forest_from_embeddings(embeddings, baseline_output_path=baseline_path)
-                score_paths.append(baseline_path)
+                model = LSHiForest(n_trees=num_trees, max_depth=max_depth, seed=k)
+                model.fit(embeddings)
+                scores = model.score_chunked(embeddings, total_rows)
+                np.save(baseline_path, scores)
+                score_paths.append(str(baseline_path))
                 model_names.append(f"lshif_{k}")
 
     metrics = calculate_stability_metrics_n(
@@ -365,9 +319,8 @@ def distance_to_centroid_correlation(
     embeddings_paths: list[str] | list[Path],
     scores: np.ndarray,
     chunk_size: int = 200_000,
+    mmap_path: str | None = None,
 ) -> dict[str, Any]:
-    import pyarrow.parquet as pq
-
     if isinstance(embeddings_paths, (str, Path)):
         embeddings_paths = [str(embeddings_paths)]
     else:
@@ -378,39 +331,65 @@ def distance_to_centroid_correlation(
         logger.warning("Too few finite scores for centroid correlation")
         return {}
 
-    total_rows, embedding_dim = _infer_embedding_shape(embeddings_paths)
-    if total_rows == 0:
-        return {}
+    if mmap_path is not None:
+        _, embedding_dim = _infer_embedding_shape(embeddings_paths)
+        file_size = Path(mmap_path).stat().st_size
+        total_rows = file_size // (embedding_dim * 4)
+        embeddings = np.memmap(
+            mmap_path,
+            dtype=np.float32,
+            mode="r",
+            shape=(total_rows, embedding_dim),
+        )
+    else:
+        total_rows, embedding_dim = _infer_embedding_shape(embeddings_paths)
+        if total_rows == 0:
+            return {}
+
+        embed_temp_dir = Path(tempfile.mkdtemp())
+        mmap_path = str(embed_temp_dir / "centroid.mmap")
+        try:
+            from patent.utils import convert_parquet_to_memmap
+
+            convert_parquet_to_memmap(embeddings_paths, mmap_path, column="embedding")
+            embeddings = np.memmap(
+                mmap_path, dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
+            )
+        except Exception:
+            shutil.rmtree(embed_temp_dir, ignore_errors=True)
+            raise
 
     centroid = np.zeros(embedding_dim, dtype=np.float64)
     centroid_n = 0
-    for pq_path in embeddings_paths:
-        pq_file = pq.ParquetFile(pq_path)
-        for batch in pq_file.iter_batches(batch_size=chunk_size, columns=["embedding"]):
-            col = batch.column("embedding")
-            flat = col.flatten().to_numpy(zero_copy_only=False)
-            emb = flat.reshape(-1, embedding_dim).astype(np.float64)
-            centroid += emb.sum(axis=0)
-            centroid_n += emb.shape[0]
+    distances = np.empty(total_rows, dtype=np.float32)
+
+    for start in range(0, total_rows, chunk_size):
+        end = min(start + chunk_size, total_rows)
+        batch = np.array(embeddings[start:end], dtype=np.float64)
+        n = batch.shape[0]
+        centroid += batch.sum(axis=0)
+        centroid_n += n
 
     if centroid_n == 0:
+        if mmap_path is None:
+            shutil.rmtree(embed_temp_dir, ignore_errors=True)
         return {}
 
     centroid /= centroid_n
+    centroid_f32 = centroid.astype(np.float32)
 
-    distances = np.empty(total_rows, dtype=np.float64)
     row_offset = 0
-    for pq_path in embeddings_paths:
-        pq_file = pq.ParquetFile(pq_path)
-        for batch in pq_file.iter_batches(batch_size=chunk_size, columns=["embedding"]):
-            col = batch.column("embedding")
-            flat = col.flatten().to_numpy(zero_copy_only=False)
-            emb = flat.reshape(-1, embedding_dim).astype(np.float64)
-            n = emb.shape[0]
-            diff = emb - centroid
-            dists = np.linalg.norm(diff, axis=1)
-            distances[row_offset : row_offset + n] = dists
-            row_offset += n
+    for start in range(0, total_rows, chunk_size):
+        end = min(start + chunk_size, total_rows)
+        batch = np.asarray(embeddings[start:end])
+        n = batch.shape[0]
+        diff = batch - centroid_f32
+        dists = np.linalg.norm(diff, axis=1)
+        distances[row_offset : row_offset + n] = dists
+        row_offset += n
+
+    if mmap_path is None:
+        shutil.rmtree(embed_temp_dir, ignore_errors=True)
 
     mask = valid_mask & np.isfinite(distances)
     if np.sum(mask) < 10:
@@ -450,6 +429,42 @@ def _infer_embedding_shape(embeddings_paths: list[str]) -> tuple[int, int]:
     return total_rows, embedding_dim
 
 
+def _train_subsample_split(args):
+    """Build and score one subsample split (runs in multiprocessing worker)."""
+    (
+        split_idx,
+        mmap_path,
+        total_rows,
+        embedding_dim,
+        subset_indices,
+        subsample_size,
+        num_trees,
+        max_depth,
+        split_seed,
+        output_path,
+    ) = args
+    from patent.lshiforest import LSHiForest
+    from patent.utils import mute_logging
+
+    embeddings = np.memmap(
+        mmap_path, dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
+    )
+
+    # Materialise subset into a contiguous array
+    subset_data = np.empty((subsample_size, embedding_dim), dtype=np.float32)
+    chunk = 200_000
+    for start in range(0, subsample_size, chunk):
+        end = min(start + chunk, subsample_size)
+        subset_data[start:end] = embeddings[subset_indices[start:end]]
+
+    with mute_logging():
+        model = LSHiForest(n_trees=num_trees, max_depth=max_depth, seed=split_seed)
+        model.fit(subset_data)
+        scores = model.score_chunked(subset_data, subsample_size)
+        np.save(output_path, scores)
+    return output_path
+
+
 def evaluate_subsampling_stability(
     embeddings_paths: list[str] | list[Path],
     num_trees: int,
@@ -459,6 +474,7 @@ def evaluate_subsampling_stability(
     top_k: int = 1000,
     spearman_sample_size: int = 100_000,
     seed: int = 42,
+    n_workers: int | None = None,
 ) -> dict[str, Any]:
     if not (0 < subsample_ratio < 1):
         raise ValueError(f"subsample_ratio must be in (0, 1), got {subsample_ratio}")
@@ -483,28 +499,79 @@ def evaluate_subsampling_stability(
     mmap_path = temp_dir / "stability_embeddings.mmap"
     embedding_dim, _ = convert_embeddings_to_memmap(embeddings_paths, mmap_path)
 
-    embeddings = np.memmap(
-        str(mmap_path), dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
-    )
+    # Pre-generate split configs
+    split_configs: list[dict] = []
+    for split_idx in range(n_splits):
+        split_seed = int(rng.integers(0, 2**31 - 1))
+        subset_indices = rng.choice(total_rows, size=subsample_size, replace=False)
+        baseline_path = temp_dir / f"depths_split{split_idx}.npy"
+        split_configs.append(
+            {
+                "split_idx": split_idx,
+                "split_seed": split_seed,
+                "subset_indices": subset_indices,
+                "output_path": str(baseline_path),
+            }
+        )
 
-    with mute_logging():
-        for split_idx in range(n_splits):
-            split_seed = int(rng.integers(0, 2**31 - 1))
-            subset_indices = rng.choice(total_rows, size=subsample_size, replace=False)
-            subset_embeddings = np.array(embeddings[subset_indices], dtype=np.float32)
+    import concurrent.futures
+    import os
 
-            baseline_path = temp_dir / f"depths_split{split_idx}.npy"
+    if n_workers is None:
+        n_workers = min(n_splits, max(1, (os.cpu_count() or 1) - 1))
 
-            model = LSHIForest(num_trees=num_trees, max_depth=max_depth, seed=split_seed)
-            model.build_forest_from_embeddings(
-                subset_embeddings,
-                baseline_output_path=baseline_path,
+    if n_workers > 1:
+        task_args = [
+            (
+                cfg["split_idx"],
+                str(mmap_path),
+                total_rows,
+                embedding_dim,
+                cfg["subset_indices"],
+                subsample_size,
+                num_trees,
+                max_depth,
+                cfg["split_seed"],
+                cfg["output_path"],
             )
+            for cfg in split_configs
+        ]
+        with mute_logging():
+            with concurrent.futures.ProcessPoolExecutor(max_workers=n_workers) as pool:
+                results = list(pool.map(_train_subsample_split, task_args))
+        for cfg, path in zip(split_configs, results):
+            score_paths.append(str(path))
+            model_names.append(f"subsample_{cfg['split_idx']}")
+    else:
+        embeddings = np.memmap(
+            str(mmap_path), dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
+        )
+        with mute_logging():
+            for cfg in split_configs:
+                # Materialise the subset as a writable memmap
+                subset_mmap_path = temp_dir / f"subset_{cfg['split_idx']}.mmap"
+                subset_data = np.memmap(
+                    str(subset_mmap_path),
+                    dtype=np.float32,
+                    mode="w+",
+                    shape=(subsample_size, embedding_dim),
+                )
+                chunk = 200_000
+                for start in range(0, subsample_size, chunk):
+                    end = min(start + chunk, subsample_size)
+                    subset_data[start:end] = embeddings[cfg["subset_indices"][start:end]]
 
-            score_paths.append(str(baseline_path))
-            model_names.append(f"subsample_{split_idx}")
+                model = LSHiForest(n_trees=num_trees, max_depth=max_depth, seed=cfg["split_seed"])
+                model.fit(subset_data)
+                scores_data = model.score_chunked(subset_data, subsample_size)
+                np.save(cfg["output_path"], scores_data)
 
-    del embeddings
+                del subset_data
+
+                score_paths.append(cfg["output_path"])
+                model_names.append(f"subsample_{cfg['split_idx']}")
+
+        del embeddings
 
     if len(score_paths) < 2:
         shutil.rmtree(temp_dir, ignore_errors=True)
@@ -526,12 +593,30 @@ def evaluate_subsampling_stability(
     return metrics
 
 
-def export_top_anomalies(
+def _export_anomalies(
     scores: np.ndarray,
     metadata: Any,
     output_path: str | Path,
-    top_k: int = 100,
+    k: int = 100,
+    *,
+    ascending: bool = False,
+    label: str = "anomalies",
 ) -> list[dict]:
+    """Export *k* records sorted by anomaly score.
+
+    Parameters
+    ----------
+    scores : shape (n,)  float32 or float64
+    metadata : pd.DataFrame
+    output_path : str or Path
+    k : int
+        Number of records to export.
+    ascending : bool
+        True → lowest scores first (least anomalous / "normal").
+        False → highest scores first (most anomalous).
+    label : str
+        Human-readable label for the log message.
+    """
     import pandas as pd
 
     valid_mask = np.isfinite(scores)
@@ -539,18 +624,21 @@ def export_top_anomalies(
     n_valid = len(valid_idx)
 
     if n_valid == 0:
-        logger.warning("No finite scores, cannot export top anomalies")
+        logger.warning(f"No finite scores, cannot export {label}")
         return []
 
-    actual_k = min(top_k, n_valid)
-    top_local = np.argsort(-scores[valid_idx], kind="stable")[:actual_k]
-    top_indices = valid_idx[top_local]
+    actual_k = min(k, n_valid)
+    if ascending:
+        local = np.argsort(scores[valid_idx], kind="stable")[:actual_k]
+    else:
+        local = np.argsort(-scores[valid_idx], kind="stable")[:actual_k]
+    indices = valid_idx[local]
 
     columns = ["id", "title", "categories", "update_date"]
     available = [c for c in columns if c in metadata.columns]
 
     records: list[dict[str, Any]] = []
-    for idx in top_indices:
+    for idx in indices:
         record: dict[str, Any] = {"anomaly_score": float(scores[idx])}
         for col in available:
             val = metadata.iloc[idx][col]
@@ -570,6 +658,29 @@ def export_top_anomalies(
     with open(output_path, "w") as f:
         json.dump(records, f, indent=2, default=str)
 
-    logger.success(f"Exported top {actual_k} anomalies to {output_path}")
+    logger.success(f"Exported {label}: {actual_k} records → {output_path}")
 
     return records
+
+
+def export_top_anomalies(
+    scores: np.ndarray,
+    metadata: Any,
+    output_path: str | Path,
+    top_k: int = 100,
+) -> list[dict]:
+    return _export_anomalies(
+        scores, metadata, output_path, k=top_k, ascending=False, label="top anomalies"
+    )
+
+
+def export_bottom_anomalies(
+    scores: np.ndarray,
+    metadata: Any,
+    output_path: str | Path,
+    bottom_k: int = 100,
+) -> list[dict]:
+    """Export the *bottom_k* least anomalous records (most "normal" papers)."""
+    return _export_anomalies(
+        scores, metadata, output_path, k=bottom_k, ascending=True, label="bottom anomalies"
+    )

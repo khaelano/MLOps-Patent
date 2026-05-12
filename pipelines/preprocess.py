@@ -1,16 +1,15 @@
-import os
-from pathlib import Path
 
 from loguru import logger
 
 from patent.cli import clean_data, embed_data, reserialize_data
 from patent.config import INTERIM_DATA_DIR, PROCESSED_DATA_DIR, RAW_DATA_DIR
+from pathlib import Path
 
 
 def main():
     logger.info("Starting preprocessing pipeline...")
 
-    snapshot_file = RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json"
+    snapshot_file = RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json.zst"
     updates_dir = RAW_DATA_DIR / "updates"
 
     targets = []
@@ -30,10 +29,14 @@ def main():
     for raw_path, is_json in targets:
         logger.info(f"=== Processing source: {raw_path.name} ===")
 
+        # Strip .zst suffix for clean output naming
+        stem_name = raw_path.name
+        if stem_name.endswith(".zst"):
+            stem_name = stem_name[:-4]
         out_name = (
-            f"{raw_path.name}.parquet"
+            f"{stem_name}.parquet"
             if raw_path.is_dir()
-            else raw_path.with_suffix(".parquet").name
+            else Path(stem_name).with_suffix(".parquet").name
         )
 
         serialized_path = INTERIM_DATA_DIR / "serialized" / out_name
@@ -64,7 +67,7 @@ def main():
             embed_data(
                 file_path=cleaned_path,
                 output_path=processed_path,
-                model_name="all-MiniLM-L6-v2",
+                embedder_spec="sentence-transformers:all-MiniLM-L6-v2",
                 batch_size=50000,
             )
         else:

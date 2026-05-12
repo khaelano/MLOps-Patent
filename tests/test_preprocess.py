@@ -28,7 +28,7 @@ def test_clean_df():
 
 
 def test_clean_df_empty_input():
-    df = pd.DataFrame(columns=["id", "title", "categories", "update_date"])
+    df = pd.DataFrame({c: pd.Series(dtype=str) for c in ["id", "title", "categories", "update_date"]})
     cleaned = clean_df(df)
     assert len(cleaned) == 0
 

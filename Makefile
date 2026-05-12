@@ -39,11 +39,17 @@ format:
 	ruff format
 
 
+## Type-check the project with ty (Astral's type checker — never mypy)
+.PHONY: typecheck
+typecheck:
+	ty check
 
-## Run tests
+
+
+## Run tests (excludes integration tests needing external services)
 .PHONY: test
 test:
-	python -m pytest tests
+	python -m pytest tests --ignore=tests/test_data_ingestion.py --ignore=tests/test_registry.py
 
 
 ## Set up Python interpreter environment
@@ -96,11 +102,20 @@ data-reduce: requirements
 	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make data-reduce INPUT=<path>"; exit 1; fi
 	uv run $(PYTHON_INTERPRETER) patent/cli.py data reduce $(INPUT)
 
-## Tune and train the novelty Isolation Forest Model via Optuna
-.PHONY: model-tune
-model-tune: requirements
-	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make model-tune INPUT=<path>"; exit 1; fi
-	uv run $(PYTHON_INTERPRETER) patent/cli.py train tune $(INPUT)
+## Train LSHiForest model on processed embeddings (default: data/processed/ -> models/)
+.PHONY: model-train
+model-train: requirements
+	uv run $(PYTHON_INTERPRETER) patent/cli.py model train $(DATA) $(OUTPUT)
+
+## Evaluate model stability (default: models/model.lshif + data/processed/)
+.PHONY: model-evaluate
+model-evaluate: requirements
+	uv run $(PYTHON_INTERPRETER) patent/cli.py model evaluate $(MODEL) $(DATA) $(OUTPUT)
+
+## Run the full pipeline: reserialize -> clean -> embed -> reduce -> train -> evaluate
+.PHONY: pipeline
+pipeline: requirements
+	uv run $(PYTHON_INTERPRETER) patent/cli.py pipeline $(if $(RAW),--raw $(RAW)) $(if $(SKIP_INIT),--skip-init) $(if $(FORCE),--force)
 
 
 #################################################################################

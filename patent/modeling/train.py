@@ -9,20 +9,19 @@ from typing import Any
 from loguru import logger
 import mlflow
 import numpy as np
-import pyarrow.parquet as pq
 
 from patent.config import CHUNK_SIZE
+from patent.lshiforest import LSHiForest
 from patent.modeling.evaluate import (
     analyze_score_distribution,
     convert_embeddings_to_memmap,
     distance_to_centroid_correlation,
     evaluate_params,
     evaluate_subsampling_stability,
+    export_bottom_anomalies,
     export_top_anomalies,
-    score_memmap_chunked,
 )
-from patent.modeling.lsh_iforest import LSHIForest
-from patent.utils import flatten_dict, load_parquet_metadata
+from patent.utils import convert_parquet_to_memmap, flatten_dict, load_parquet_metadata
 
 
 def parquet_to_memmap(
@@ -40,56 +39,9 @@ def parquet_to_memmap(
     if not pq_paths:
         raise ValueError("No parquet paths provided.")
 
-    total_rows = 0
-    embedding_dim = None
-
-    for pq_path in pq_paths:
-        pq_file = pq.ParquetFile(pq_path)
-        total_rows += pq_file.metadata.num_rows
-
-    try:
-        first_pq_file = pq.ParquetFile(pq_paths[0])
-        first_batch = next(first_pq_file.iter_batches(batch_size=1, columns=[column]))
-        embedding_dim = len(first_batch.column(0)[0])
-    except StopIteration:
-        raise ValueError("Parquet file is empty.")
-    except Exception as e:
-        raise ValueError(f"Failed to infer embedding dimension: {e}")
-
-    logger.info(f"Inferred embedding dimension: {embedding_dim} over {total_rows} total rows")
-
-    mmap_file = np.memmap(mmap_path, dtype="float32", mode="w+", shape=(total_rows, embedding_dim))
-
-    curr_idx = 0
-    for pq_path in pq_paths:
-        logger.debug(f"Processing {pq_path} to memmap...")
-        pq_file = pq.ParquetFile(pq_path)
-
-        for batch in pq_file.iter_batches(batch_size=chunk_size, columns=[column]):
-            flat_arr = batch.column(0).flatten().to_numpy()
-
-            arr = flat_arr.reshape(-1, embedding_dim)
-
-            if arr.shape[1] != embedding_dim:
-                raise ValueError(
-                    f"Dimension mismatch at row {curr_idx}. "
-                    f"Expected {embedding_dim}, got {arr.shape[1]}"
-                )
-
-            slice_end = curr_idx + len(arr)
-            mmap_file[curr_idx:slice_end] = arr
-
-            curr_idx = slice_end
-
-    mmap_file.flush()
-
-    if curr_idx != total_rows:
-        logger.warning(
-            f"Processed {curr_idx} rows, but metadata says {total_rows}. "
-            "Check for nulls or corrupted rows."
-        )
-
-    return (embedding_dim, mmap_path)
+    embedding_dim, _ = convert_parquet_to_memmap(pq_paths, str(mmap_path), column)
+    logger.info(f"Inferred embedding dimension: {embedding_dim}")
+    return embedding_dim, str(mmap_path)
 
 
 def process_embeddings(
@@ -125,17 +77,43 @@ def train_model(
     if not embeddings_paths:
         raise FileNotFoundError(f"No .parquet files found in {embeddings_dir}")
 
-    mlflow_run = (
-        mlflow.start_run(**mlflow_context) if mlflow_context is not None else nullcontext()
-    )
-    with mlflow_run:
-        model = LSHIForest(**model_params, chunk_size=CHUNK_SIZE)
-        model.build_forest(embeddings_paths=embeddings_paths, baseline_output_path=baseline_path)
-        model.save_model(model_path)
+    # ── Convert parquet → memmap ONCE, reuse for fit + baseline scoring ──
+    embed_temp_dir = Path(tempfile.mkdtemp())
+    mmap_path = embed_temp_dir / "embeddings.mmap"
+    try:
+        logger.info("Converting Parquet embeddings to memory-mapped array...")
+        embedding_dim, total_rows = convert_parquet_to_memmap(embeddings_paths, str(mmap_path))
+        if total_rows == 0 or embedding_dim == 0:
+            raise ValueError("No embeddings found in provided files")
+        embeddings_mmap = np.memmap(
+            str(mmap_path),
+            dtype=np.float32,
+            mode="r",
+            shape=(total_rows, embedding_dim),
+        )
 
-        end_time = time.perf_counter() - start_time
-        logger.success(f"Model trained successfully in {end_time:.2f}s.")
-        logger.success(f"Model path is {model_path}.")
+        mlflow_run = (
+            mlflow.start_run(**mlflow_context) if mlflow_context is not None else nullcontext()
+        )
+        with mlflow_run:
+            # Fit directly from the shared memmap (only tiny subsamples are materialised)
+            model = LSHiForest(**model_params)
+            model.fit(embeddings_mmap)
+            model.save(model_path)
+
+            # Baseline scoring from the same memmap (no second conversion)
+            logger.info("Computing baseline anomaly scores...")
+            baseline_scores = model.score_chunked(
+                embeddings_mmap, total_rows, chunk_size=CHUNK_SIZE
+            )
+            np.save(baseline_path, baseline_scores)
+            logger.success(f"Baseline scores saved to {baseline_path}")
+
+            end_time = time.perf_counter() - start_time
+            logger.success(f"Model trained successfully in {end_time:.2f}s.")
+            logger.success(f"Model path is {model_path}.")
+    finally:
+        shutil.rmtree(embed_temp_dir, ignore_errors=True)
 
     return str(output_dir)
 
@@ -154,9 +132,9 @@ def evaluate_model(
     embeddings_dir = Path(embeddings_dir)
     start_time = time.perf_counter()
 
-    model = LSHIForest.load_model(model_path)
-    num_trees = model.meta.num_trees
-    max_depth = model.meta.max_depth
+    model = LSHiForest.load(model_path)
+    num_trees = model.n_trees
+    max_depth = model.max_depth
 
     embeddings_paths = [str(p) for p in sorted(embeddings_dir.glob("*.parquet"))]
     if not embeddings_paths:
@@ -170,18 +148,20 @@ def evaluate_model(
         embed_temp_dir = Path(tempfile.mkdtemp())
 
         try:
+            # ── Create the memmap ONCE, share with evaluate_params ──
+            logger.info("Converting embeddings to shared memmap...")
+            mmap_path = embed_temp_dir / "embeddings.mmap"
+            embedding_dim, total_rows = convert_embeddings_to_memmap(embeddings_paths, mmap_path)
+
             logger.info("Running seed-based stability evaluation...")
             seed_stability = evaluate_params(
                 [Path(p) for p in embeddings_paths],
                 num_trees=num_trees,
                 max_depth=max_depth,
                 n_workers=n_workers,
+                shared_mmap=(str(mmap_path), total_rows, embedding_dim),
             )
             eval_result["stability"] = seed_stability["summary"]
-
-            logger.info("Converting embeddings to shared memmap...")
-            mmap_path = embed_temp_dir / "embeddings.mmap"
-            embedding_dim, total_rows = convert_embeddings_to_memmap(embeddings_paths, mmap_path)
 
             logger.info("Loading metadata for evaluation...")
             metadata = load_parquet_metadata(embeddings_paths)
@@ -193,20 +173,27 @@ def evaluate_model(
                 embeddings_mmap = np.memmap(
                     mmap_path, dtype=np.float32, mode="r", shape=(total_rows, embedding_dim)
                 )
-                scores = score_memmap_chunked(model, embeddings_mmap, total_rows)
+                scores = model.score_chunked(embeddings_mmap, total_rows)
 
                 logger.info("Analyzing score distribution...")
                 eval_result["score_distribution"] = analyze_score_distribution(scores)
 
                 logger.info("Computing distance-to-centroid correlation...")
                 eval_result["centroid_correlation"] = distance_to_centroid_correlation(
-                    embeddings_paths, scores
+                    embeddings_paths,
+                    scores,
+                    mmap_path=str(mmap_path),
                 )
 
                 logger.info(f"Exporting top {top_k} anomalies...")
                 top_path = Path(output_path).parent / "top_anomalies.json"
                 export_top_anomalies(scores, metadata, top_path, top_k=top_k)
                 eval_result["top_anomalies_path"] = str(top_path)
+
+                logger.info(f"Exporting bottom {top_k} anomalies...")
+                bottom_path = Path(output_path).parent / "bottom_anomalies.json"
+                export_bottom_anomalies(scores, metadata, bottom_path, bottom_k=top_k)
+                eval_result["bottom_anomalies_path"] = str(bottom_path)
 
             if do_subsampling:
                 logger.info(f"Running subsampling stability ({subsample_splits} splits)...")
@@ -233,6 +220,9 @@ def evaluate_model(
             top_path = Path(output_path).parent / "top_anomalies.json"
             if top_path.exists():
                 mlflow.log_artifact(str(top_path))
+            bottom_path = Path(output_path).parent / "bottom_anomalies.json"
+            if bottom_path.exists():
+                mlflow.log_artifact(str(bottom_path))
 
     end_time = time.perf_counter() - start_time
     logger.success(f"Model evaluated in {end_time:.2f}s.")
