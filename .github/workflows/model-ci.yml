@@ -18,17 +18,13 @@ jobs:
   train-evaluate-register:
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    environment: Patent Model & Dataset Storage
 
     # ── Environment variables ────────────────────────────────────────────
     env:
       # Python
       UV_SYSTEM_PYTHON: "1"
       PYTHONUNBUFFERED: "1"
-      # DVC / S3
-      AWS_ACCESS_KEY_ID: ${{ secrets.DVC_S3_ACCESS_KEY }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.DVC_S3_SECRET_KEY }}
-      AWS_ENDPOINT_URL_S3: ${{ secrets.DVC_S3_ENDPOINT }}
-      DVC_S3_ENDPOINTURL: ${{ secrets.DVC_S3_ENDPOINT }}
       # MLflow client (connects to the server we start below)
       MLFLOW_TRACKING_URI: http://127.0.0.1:5000
 
@@ -62,6 +58,12 @@ jobs:
 
       # ── Pull DVC-tracked data ──────────────────────────────────────────
       - name: Pull dataset from DVC remote
+        env:
+          # DVC / S3
+          AWS_ACCESS_KEY_ID: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DVC_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.DVC_S3_ENDPOINT }}
+          DVC_S3_ENDPOINTURL: ${{ secrets.DVC_S3_ENDPOINT }}
         run: |
           uv run dvc pull --verbose
 
