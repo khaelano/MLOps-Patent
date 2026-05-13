@@ -43,11 +43,6 @@ jobs:
       - name: Install Python dependencies
         run: |
           uv sync
-          # DVC with S3 support for dvc pull (pulls in s3fs, aiobotocore).
-          uv pip install "dvc[s3]"
-          # boto3 is NOT pulled in by dvc[s3] but is required by MLflow's
-          # S3 artifact store (both server-side uploads and client log_artifact).
-          uv pip install boto3
 
       # ── Pull DVC-tracked data ──────────────────────────────────────────
       - name: Pull dataset from DVC remote
