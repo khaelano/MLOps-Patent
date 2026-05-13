@@ -11,26 +11,22 @@ Usage:
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from dataclasses import dataclass, field
 import json
 import os
+from pathlib import Path
 import shutil
 import sys
 import time
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
+from loguru import logger as _logger
 import numpy as np
 import pandas as pd
 import psutil
 import pyarrow as pa
 import pyarrow.parquet as pq
-from loguru import logger as _logger
-
-# -- ensure the project root is on sys.path -----------------------------------
-PROJ_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PROJ_ROOT))
 
 from patent.config import RAW_DATA_DIR, project_tempdir
 from patent.dataset.embedders import get_embedder
@@ -46,6 +42,10 @@ from patent.utils import (
     load_parquet_metadata,
     mute_logging,
 )
+
+# -- ensure the project root is on sys.path -----------------------------------
+PROJ_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJ_ROOT))
 
 # ---------------------------------------------------------------------------
 # Profiling data structures
@@ -120,6 +120,11 @@ class ResourceProbe:
         return self._samples
 
 
+# Module-level slot so callers can retrieve the last StageProfile without
+# relying on dynamic function-attribute assignment (which type-checkers reject).
+_last_profile: StageProfile | None = None
+
+
 @contextmanager
 def profiled_stage(stage_name: str, interval: float = 0.5):
     """Context manager that samples resources at *interval* seconds.
@@ -188,7 +193,7 @@ def profiled_stage(stage_name: str, interval: float = 0.5):
             f"RSS_peak={stage.rss_peak_mib:.0f}MiB  CPU_avg={stage.cpu_mean_pct:.0f}%"
         )
         # Store on context manager attr for retrieval
-        profiled_stage._last_profile = stage  # type: ignore[attr-defined]
+        _last_profile = stage
 
 
 def _system_info() -> dict[str, Any]:
@@ -208,7 +213,9 @@ def _system_info() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def profile_preprocessing(cleaned_path: Path, serialized_path: Path, raw_dir: Path) -> StageProfile:
+def profile_preprocessing(
+    cleaned_path: Path, serialized_path: Path, raw_dir: Path
+) -> StageProfile:
     """Reserialize raw XML → serialized Parquet → cleaned Parquet.
 
     Uses the smallest update batch available (~6k rows).
@@ -232,7 +239,8 @@ def profile_preprocessing(cleaned_path: Path, serialized_path: Path, raw_dir: Pa
         df_cleaned.to_parquet(cleaned_path, index=False)
         probe.sample()
 
-    profile = profiled_stage._last_profile  # type: ignore[attr-defined]
+    assert _last_profile is not None
+    profile = _last_profile  # type: ignore[attr-defined]
     profile.metadata = {
         "input_rows": df_cleaned.shape[0],
         "input_cols": df_cleaned.shape[1],
@@ -242,7 +250,9 @@ def profile_preprocessing(cleaned_path: Path, serialized_path: Path, raw_dir: Pa
     return profile
 
 
-def profile_embedding(cleaned_path: Path, output_path: Path, batch_size: int = 2500) -> StageProfile:
+def profile_embedding(
+    cleaned_path: Path, output_path: Path, batch_size: int = 2500
+) -> StageProfile:
     """Embed cleaned text data → output Parquet with embedding column.
 
     Parameters
@@ -297,7 +307,8 @@ def profile_embedding(cleaned_path: Path, output_path: Path, batch_size: int = 2
         elapsed = time.perf_counter() - t0
         _logger.info(f"  Embedded {total_rows} rows in {chunks_done} chunks ({elapsed:.2f}s)")
 
-    profile = profiled_stage._last_profile  # type: ignore[attr-defined]
+    assert _last_profile is not None
+    profile = _last_profile  # type: ignore[attr-defined]
     profile.metadata = {
         "total_rows": total_rows,
         "chunks": chunks_done,
@@ -373,7 +384,8 @@ def profile_training(
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    profile = profiled_stage._last_profile  # type: ignore[attr-defined]
+    assert _last_profile is not None
+    profile = _last_profile  # type: ignore[attr-defined]
     profile.metadata = {
         "total_rows": total_rows,
         "embedding_dim": embedding_dim,
@@ -458,7 +470,8 @@ def profile_evaluation(
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    profile = profiled_stage._last_profile  # type: ignore[attr-defined]
+    assert _last_profile is not None
+    profile = _last_profile  # type: ignore[attr-defined]
     profile.metadata = {
         "total_rows": total_rows,
         "embedding_dim": embedding_dim,
@@ -545,14 +558,14 @@ def generate_report(
     total_rss_peak = max(p.rss_peak_mib for p in profiles) if profiles else 0
 
     lines = [
-        f"# MLOps-Patent Pipeline Profiling Report",
+        "# MLOps-Patent Pipeline Profiling Report",
         "",
         f"**Generated**: {time.strftime('%Y-%m-%d %H:%M:%S')}",
         "",
         "## System Information",
         "",
-        f"| Property | Value |",
-        f"|----------|-------|",
+        "| Property | Value |",
+        "|----------|-------|",
         f"| Platform | {system['platform']} |",
         f"| Python | {system['python_version']} |",
         f"| CPU (logical) | {system['cpu_count_logical']} |",
