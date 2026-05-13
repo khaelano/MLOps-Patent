@@ -43,6 +43,11 @@ jobs:
       - name: Install Python dependencies
         run: |
           uv sync
+          # DVC with S3 support for dvc pull (pulls in s3fs, aiobotocore).
+          uv pip install "dvc[s3]"
+          # boto3 is NOT pulled in by dvc[s3] but is required by MLflow's
+          # S3 artifact store (both server-side uploads and client log_artifact).
+          uv pip install boto3
 
       # ── Pull DVC-tracked data ──────────────────────────────────────────
       - name: Pull dataset from DVC remote
@@ -94,6 +99,10 @@ jobs:
         id: train
         env:
           MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+          # MLflow client needs S3 creds to push artifacts (model, eval, exports)
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
         run: |
           output=$(uv run python patent/cli.py model train \
             --mlflow-experiment "ci-pr-${{ github.event.pull_request.number }}" \
@@ -111,6 +120,10 @@ jobs:
         id: register
         env:
           MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+          # Registry client also needs S3 creds to resolve artifact URIs
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
         run: |
           uv run python patent/cli.py model register \
             "${{ steps.train.outputs.run_id }}" \
