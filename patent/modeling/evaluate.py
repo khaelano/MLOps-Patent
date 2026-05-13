@@ -8,7 +8,7 @@ from loguru import logger
 import numpy as np
 from scipy.stats import kurtosis, pearsonr, skew, spearmanr
 
-from patent.config import project_tempdir
+from patent.config import CHUNK_SIZE, project_tempdir
 from patent.lshiforest import LSHiForest
 from patent.utils import convert_parquet_to_memmap, mute_logging
 
@@ -160,7 +160,7 @@ def convert_embeddings_to_memmap(
     embeddings_paths: list[str],
     output_path: str | Path,
     column: str = "embedding",
-    chunk_size: int = 200_000,
+    chunk_size: int = CHUNK_SIZE,
 ) -> tuple[int, int]:
     return convert_parquet_to_memmap(embeddings_paths, output_path, column)
 
@@ -318,7 +318,7 @@ def analyze_score_distribution(scores: np.ndarray) -> dict[str, Any]:
 def distance_to_centroid_correlation(
     embeddings_paths: list[str] | list[Path],
     scores: np.ndarray,
-    chunk_size: int = 200_000,
+    chunk_size: int = CHUNK_SIZE,
     mmap_path: str | None = None,
 ) -> dict[str, Any]:
     if isinstance(embeddings_paths, (str, Path)):
@@ -452,7 +452,7 @@ def _train_subsample_split(args):
 
     # Materialise subset into a contiguous array
     subset_data = np.empty((subsample_size, embedding_dim), dtype=np.float32)
-    chunk = 200_000
+    chunk = CHUNK_SIZE
     for start in range(0, subsample_size, chunk):
         end = min(start + chunk, subsample_size)
         subset_data[start:end] = embeddings[subset_indices[start:end]]
@@ -556,7 +556,7 @@ def evaluate_subsampling_stability(
                     mode="w+",
                     shape=(subsample_size, embedding_dim),
                 )
-                chunk = 200_000
+                chunk = CHUNK_SIZE
                 for start in range(0, subsample_size, chunk):
                     end = min(start + chunk, subsample_size)
                     subset_data[start:end] = embeddings[cfg["subset_indices"][start:end]]

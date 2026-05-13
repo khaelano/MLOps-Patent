@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from patent.config import RAW_DATA_DIR
+from patent.config import CHUNK_SIZE, RAW_DATA_DIR
 
 
 @contextmanager
@@ -187,7 +187,7 @@ def get_vectors_from_files(file_paths: list[str], target_dtype=np.float32) -> np
             parquet_file = pq.ParquetFile(f)
 
             # Process in batches iteratively to prevent out-of-memory errors
-            for batch in parquet_file.iter_batches(batch_size=50000, columns=["embedding"]):
+            for batch in parquet_file.iter_batches(batch_size=CHUNK_SIZE, columns=["embedding"]):
                 col = batch.column("embedding")
 
                 # Determine dimensionality
@@ -232,7 +232,7 @@ def load_parquet_metadata(file_paths: list[str]) -> pd.DataFrame:
                 logger.warning(f"No metadata columns found in {f}")
                 continue
 
-            for batch in parquet_file.iter_batches(batch_size=50000, columns=available):
+            for batch in parquet_file.iter_batches(batch_size=CHUNK_SIZE, columns=available):
                 blocks.append(batch.to_pandas())
 
         except Exception as e:

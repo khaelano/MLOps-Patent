@@ -4,7 +4,13 @@ from loguru import logger
 import pandas as pd
 import typer
 
-from patent.config import INTERIM_DATA_DIR, MODELS_DIR, PROCESSED_DATA_DIR, RAW_DATA_DIR
+from patent.config import (
+    CHUNK_SIZE,
+    INTERIM_DATA_DIR,
+    MODELS_DIR,
+    PROCESSED_DATA_DIR,
+    RAW_DATA_DIR,
+)
 from patent.dataset.ingest import (
     download_kaggle_snapshot,
     extract_latest_update,
@@ -150,7 +156,7 @@ def embed_data(
         "--embedder",
         help="Embedder spec: '<protocol>:<model>' (e.g. 'embed-anything-onnx:AllMiniLML6V2Q')",
     ),
-    batch_size: int = typer.Option(50000, help="Row count per chunk to process sequentially"),
+    batch_size: int = typer.Option(CHUNK_SIZE, help="Row count per chunk to process sequentially"),
 ):
     """Read a cleaned Parquet artifact sequentially in chunks using PyArrow to
     minimize memory footprint.  Generates text embeddings for titles using

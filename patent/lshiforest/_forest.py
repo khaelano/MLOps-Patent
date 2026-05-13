@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from patent.config import CHUNK_SIZE
 from patent.lshiforest._family import AngleFamily, L2Family, LSHFamily
 from patent.lshiforest._scoring import score_tree
 from patent.lshiforest._serialize import load_forest, save_forest
@@ -507,7 +508,7 @@ class LSHiForest:
         self,
         mmap: np.ndarray,
         total_rows: int,
-        chunk_size: int = 100_000,
+        chunk_size: int = CHUNK_SIZE,
         n_workers: int | None = None,
         tree_batch: int = 10,
     ) -> np.ndarray:
@@ -520,7 +521,7 @@ class LSHiForest:
         total_rows : int
             Number of rows in the memmap.
         chunk_size : int
-            Rows per chunk (default 100k).
+            Rows per chunk (default from ``patent.config.CHUNK_SIZE``).
         n_workers : int | None
             Number of threads for parallel tree scoring.
         tree_batch : int

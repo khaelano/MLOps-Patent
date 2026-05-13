@@ -11,6 +11,7 @@ from loguru import logger
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from patent.config import CHUNK_SIZE
 from patent.utils import open_maybe_zst
 
 _SCHEMA = pa.schema(
@@ -100,7 +101,7 @@ def _iter_xml_records(file_path: Path):
         elem.clear()
 
 
-def _write_records(records_iter, output_path: Path, batch_size: int = 100_000) -> int:
+def _write_records(records_iter, output_path: Path, batch_size: int = CHUNK_SIZE) -> int:
     """Stream record dicts into a Parquet file in batches.
 
     Returns the total number of records written.
@@ -137,7 +138,7 @@ def _write_records(records_iter, output_path: Path, batch_size: int = 100_000) -
     return count
 
 
-def parse_snapshot_json_file(file_path: Path, output_path: Path, batch_size: int = 100_000):
+def parse_snapshot_json_file(file_path: Path, output_path: Path, batch_size: int = CHUNK_SIZE):
     """Stream-parse a newline-delimited JSON snapshot into a Parquet file."""
     logger.info(f"Parsing JSON metadata from {file_path}")
     with _benchmark("parse_snapshot_json_file"):
@@ -145,7 +146,7 @@ def parse_snapshot_json_file(file_path: Path, output_path: Path, batch_size: int
     logger.info(f"Successfully serialized {count} records to {output_path}")
 
 
-def parse_oai_xml_file(file_path: Path, output_path: Path, batch_size: int = 100_000):
+def parse_oai_xml_file(file_path: Path, output_path: Path, batch_size: int = CHUNK_SIZE):
     """Stream-parse an OAI-PMH XML file into a Parquet file."""
     logger.info(f"Parsing OAI-PMH XML from {file_path}")
     with _benchmark("parse_oai_xml_file"):
@@ -153,7 +154,7 @@ def parse_oai_xml_file(file_path: Path, output_path: Path, batch_size: int = 100
     logger.info(f"Successfully serialized {count} records to {output_path}")
 
 
-def parse_oai_xml_directory(dir_path: Path, output_path: Path, batch_size: int = 100_000):
+def parse_oai_xml_directory(dir_path: Path, output_path: Path, batch_size: int = CHUNK_SIZE):
     """Stream-parse all XML files in a directory into a single Parquet file."""
     xml_files = sorted(list(dir_path.glob("**/*.xml")) + list(dir_path.glob("**/*.xml.zst")))
     logger.info(f"Parsing {len(xml_files)} OAI-PMH XML files from {dir_path}")

@@ -6,7 +6,14 @@ import shutil
 from dotenv import load_dotenv
 from loguru import logger
 
-CHUNK_SIZE = 400_000
+# ── Data-chunking constants ─────────────────────────────────────────────────
+# Every pipeline stage that processes data in batches reads this value.
+# Lower it for memory-constrained VMs (e.g. 50_000 for 4 GiB RAM);
+# raise it for throughput on large machines (e.g. 200_000+).
+# The peak RSS per scoring chunk scales at ~130 bytes/row, so:
+#    50_000 rows  →  ~0.6 GiB    100_000 rows →  ~1.2 GiB
+#   150_000 rows  →  ~1.8 GiB    200_000 rows →  ~2.4 GiB
+CHUNK_SIZE = 100_000
 
 # Load environment variables from .env file if it exists
 load_dotenv()

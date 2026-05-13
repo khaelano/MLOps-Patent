@@ -27,7 +27,6 @@ def parquet_to_memmap(
     pq_paths: str | list[str],
     mmap_path: str,
     column: str = "embedding",
-    chunk_size: int = 200_000,
 ) -> tuple[int, str]:
     """Utility to convert a column in one or multiple parquet files into a memory-mapped numpy array."""
     if isinstance(pq_paths, (str, Path)):
@@ -50,7 +49,7 @@ def process_embeddings(
     logger.info(f"Generating embeddings memmap from {parquet_path}...")
     start_time = time.perf_counter()
 
-    num_dim, mmap_path = parquet_to_memmap(parquet_path, output_path, chunk_size=CHUNK_SIZE)
+    num_dim, mmap_path = parquet_to_memmap(parquet_path, output_path)
 
     end_time = time.perf_counter() - start_time
     logger.success(f"Embeddings memmap generated successfully in {end_time:.2f}s.")
