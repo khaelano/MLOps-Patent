@@ -49,7 +49,7 @@ jobs:
           uv sync
           # DVC with S3 support (pulls in boto3, s3fs — also needed by
           # MLflow for its S3 artifact store).
-          uv pip install "dvc[s3]"
+          uv tool install "dvc[s3]"
 
       # ── Pull DVC-tracked data ──────────────────────────────────────────
       - name: Pull dataset from DVC remote
