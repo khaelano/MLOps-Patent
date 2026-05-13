@@ -110,12 +110,20 @@ def train_model(
             shape=(total_rows, embedding_dim),
         )
 
-        mlflow_run = (
-            mlflow.start_run(**mlflow_context) if mlflow_context is not None else nullcontext()
-        )
+        # ── MLflow: set_experiment before start_run ─────────────────────
+        if mlflow_context is not None:
+            experiment_name = mlflow_context.pop("experiment_name", None)
+            if experiment_name:
+                mlflow.set_experiment(experiment_name)
+            mlflow_run: Any = mlflow.start_run(**mlflow_context)
+            using_mlflow = True
+        else:
+            mlflow_run = nullcontext()
+            using_mlflow = False
+
         with mlflow_run:
             # ── Log model parameters ──
-            if mlflow_context:
+            if using_mlflow:
                 mlflow.log_params(model_params)
                 mlflow.log_param("embedding_dim", embedding_dim)
                 mlflow.log_param("total_rows", total_rows)
@@ -132,7 +140,7 @@ def train_model(
             logger.success(f"Model fit in {fit_time:.2f}s")
 
             model.save(model_path)
-            if mlflow_context:
+            if using_mlflow:
                 mlflow.log_artifact(model_path)
 
             # ── Baseline scoring ──
@@ -144,7 +152,7 @@ def train_model(
             baseline_time = time.perf_counter() - t_score
             logger.success(f"Baseline scoring in {baseline_time:.2f}s")
 
-            if mlflow_context:
+            if using_mlflow:
                 total_time = time.perf_counter() - start_time
                 mlflow.log_metrics(
                     {
@@ -207,7 +215,7 @@ def train_model(
                 json.dump(flattened_eval, f, indent=2)
             logger.success(f"Evaluation saved to {eval_path}")
 
-            if mlflow_context:
+            if using_mlflow:
                 # Log numeric eval metrics
                 mlflow.log_metrics(
                     {k: v for k, v in flattened_eval.items() if isinstance(v, (int, float))}
@@ -253,9 +261,16 @@ def evaluate_model(
     if not embeddings_paths:
         raise FileNotFoundError(f"No .parquet files found in {embeddings_dir}")
 
-    mlflow_run = (
-        mlflow.start_run(**mlflow_context) if mlflow_context is not None else nullcontext()
-    )
+    if mlflow_context is not None:
+        experiment_name = mlflow_context.pop("experiment_name", None)
+        if experiment_name:
+            mlflow.set_experiment(experiment_name)
+        mlflow_run: Any = mlflow.start_run(**mlflow_context)
+        using_mlflow = True
+    else:
+        mlflow_run = nullcontext()
+        using_mlflow = False
+
     with mlflow_run:
         eval_result: dict[str, Any] = {}
         embed_temp_dir = project_tempdir()
@@ -325,7 +340,7 @@ def evaluate_model(
         with open(output_path, "w") as f:
             json.dump(flattened_eval, f, indent=2)
 
-        if mlflow_context:
+        if using_mlflow:
             mlflow.log_metrics(
                 {k: v for k, v in flattened_eval.items() if isinstance(v, (int, float))}
             )
