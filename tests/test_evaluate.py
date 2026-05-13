@@ -201,8 +201,8 @@ class TestFullEvaluateModel:
         temp_path = Path(tempfile.mkdtemp())
         embeddings_dir = Path(DATA_DIR) / "sample" / "embeddings"
 
-        train_output_path = Path(train_model(embeddings_dir, temp_path))
-        model_file = train_output_path / "model.lshif"
+        train_result = train_model(embeddings_dir, temp_path)
+        model_file = Path(train_result["output_dir"]) / "model.lshif"
         assert model_file.exists()
 
         result = evaluate_model(
@@ -237,14 +237,12 @@ class TestFullEvaluateModel:
         temp_path = Path(tempfile.mkdtemp())
         embeddings_dir = Path(DATA_DIR) / "sample" / "embeddings"
 
-        train_output_path = Path(
-            train_model(
-                embeddings_dir,
-                temp_path,
-                model_params={"num_trees": 5, "max_depth": 8},
-            )
+        train_result = train_model(
+            embeddings_dir,
+            temp_path,
+            model_params={"num_trees": 5, "max_depth": 8},
         )
-        model_file = train_output_path / "model.lshif"
+        model_file = Path(train_result["output_dir"]) / "model.lshif"
 
         result = evaluate_model(
             model_path=model_file,

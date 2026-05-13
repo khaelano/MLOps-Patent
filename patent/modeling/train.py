@@ -1,5 +1,6 @@
 from contextlib import nullcontext
 import json
+import os
 from pathlib import Path
 import shutil
 import time
@@ -63,21 +64,40 @@ def train_model(
     output_dir: str | Path,
     model_params: dict[str, Any] = {},
     mlflow_context: dict[str, Any] | None = None,
-) -> str:
+    *,
+    top_k: int = 100,
+    do_subsampling: bool = False,
+    n_workers: int | None = None,
+) -> dict[str, Any]:
+    """Train an LSHiForest model and run evaluation inline.
+
+    When *mlflow_context* is provided (e.g. ``{"experiment_name": "my-exp"}``),
+    the model, training metrics, evaluation metrics, and anomaly exports are all
+    logged to a single MLflow run.  When *mlflow_context* is ``None``, MLflow is
+    skipped entirely.
+
+    Returns a dict with keys ``output_dir``, ``eval_result``, and ``run_id``
+    (the latter is ``None`` when MLflow is not active).
+    """
     logger.info(f"Training model from embeddings in {embeddings_dir}")
     embeddings_dir = Path(embeddings_dir)
     start_time = time.perf_counter()
 
     output_dir = Path(output_dir)
     model_path = str((output_dir / "model.lshif"))
-    baseline_path = str((output_dir / "baseline_depth.npy"))
+    eval_path = str((output_dir / "evaluation.json"))
+    top_path = str((output_dir / "top_anomalies.json"))
+    bottom_path = str((output_dir / "bottom_anomalies.json"))
     embeddings_paths = [str(p) for p in embeddings_dir.glob("*.parquet")]
     if not embeddings_paths:
         raise FileNotFoundError(f"No .parquet files found in {embeddings_dir}")
 
-    # ── Convert parquet → memmap ONCE, reuse for fit + baseline scoring ──
+    # ── Convert parquet → memmap ONCE, reuse for fit + scoring + evaluation ──
     embed_temp_dir = project_tempdir()
     mmap_path = embed_temp_dir / "embeddings.mmap"
+    eval_result: dict[str, Any] = {}
+    run_id: str | None = None
+
     try:
         logger.info("Converting Parquet embeddings to memory-mapped array...")
         embedding_dim, total_rows = convert_parquet_to_memmap(embeddings_paths, str(mmap_path))
@@ -94,26 +114,121 @@ def train_model(
             mlflow.start_run(**mlflow_context) if mlflow_context is not None else nullcontext()
         )
         with mlflow_run:
-            # Fit directly from the shared memmap (only tiny subsamples are materialised)
+            # ── Log model parameters ──
+            if mlflow_context:
+                mlflow.log_params(model_params)
+                mlflow.log_param("embedding_dim", embedding_dim)
+                mlflow.log_param("total_rows", total_rows)
+                mlflow.log_param("top_k", top_k)
+                active_run = mlflow.active_run()
+                if active_run is not None:
+                    run_id = active_run.info.run_id
+
+            # ── Fit ──
+            t_fit = time.perf_counter()
             model = LSHiForest(**model_params)
             model.fit(embeddings_mmap)
-            model.save(model_path)
+            fit_time = time.perf_counter() - t_fit
+            logger.success(f"Model fit in {fit_time:.2f}s")
 
-            # Baseline scoring from the same memmap (no second conversion)
+            model.save(model_path)
+            if mlflow_context:
+                mlflow.log_artifact(model_path)
+
+            # ── Baseline scoring ──
+            t_score = time.perf_counter()
             logger.info("Computing baseline anomaly scores...")
             baseline_scores = model.score_chunked(
                 embeddings_mmap, total_rows, chunk_size=CHUNK_SIZE
             )
-            np.save(baseline_path, baseline_scores)
-            logger.success(f"Baseline scores saved to {baseline_path}")
+            baseline_time = time.perf_counter() - t_score
+            logger.success(f"Baseline scoring in {baseline_time:.2f}s")
 
-            end_time = time.perf_counter() - start_time
-            logger.success(f"Model trained successfully in {end_time:.2f}s.")
-            logger.success(f"Model path is {model_path}.")
+            if mlflow_context:
+                total_time = time.perf_counter() - start_time
+                mlflow.log_metrics(
+                    {
+                        "train/fit_time_s": fit_time,
+                        "train/baseline_scoring_time_s": baseline_time,
+                        "train/total_time_s": total_time,
+                    }
+                )
+
+            # ── Evaluation (inline, reusing the same memmap) ──
+            metadata = load_parquet_metadata(embeddings_paths)
+
+            # Seed-based stability
+            logger.info("Running seed-based stability evaluation...")
+            t_stab = time.perf_counter()
+            seed_stability = evaluate_params(
+                [Path(p) for p in embeddings_paths],
+                num_trees=model.n_trees,
+                max_depth=model.max_depth,
+                n_workers=n_workers,
+                shared_mmap=(str(mmap_path), total_rows, embedding_dim),
+            )
+            stab_time = time.perf_counter() - t_stab
+            eval_result["stability"] = seed_stability["summary"]
+
+            # Score distribution
+            eval_result["score_distribution"] = analyze_score_distribution(baseline_scores)
+
+            # Distance-to-centroid correlation
+            logger.info("Computing distance-to-centroid correlation...")
+            eval_result["centroid_correlation"] = distance_to_centroid_correlation(
+                embeddings_paths,
+                baseline_scores,
+                mmap_path=str(mmap_path),
+            )
+
+            # Export top / bottom anomalies
+            logger.info(f"Exporting top {top_k} anomalies...")
+            export_top_anomalies(baseline_scores, metadata, top_path, top_k=top_k)
+            eval_result["top_anomalies_path"] = top_path
+
+            logger.info(f"Exporting bottom {top_k} anomalies...")
+            export_bottom_anomalies(baseline_scores, metadata, bottom_path, bottom_k=top_k)
+            eval_result["bottom_anomalies_path"] = bottom_path
+
+            # Subsampling stability (optional — expensive)
+            if do_subsampling:
+                logger.info("Running subsampling stability (5 splits)...")
+                subsample_stability = evaluate_subsampling_stability(
+                    [Path(p) for p in embeddings_paths],
+                    num_trees=model.n_trees,
+                    max_depth=model.max_depth,
+                    n_splits=5,
+                )
+                eval_result["subsampling_stability"] = subsample_stability["summary"]
+
+            # ── Persist & log evaluation ──
+            flattened_eval = flatten_dict(eval_result)
+            with open(eval_path, "w") as f:
+                json.dump(flattened_eval, f, indent=2)
+            logger.success(f"Evaluation saved to {eval_path}")
+
+            if mlflow_context:
+                # Log numeric eval metrics
+                mlflow.log_metrics(
+                    {k: v for k, v in flattened_eval.items() if isinstance(v, (int, float))}
+                )
+                # Log eval-specific timing
+                mlflow.log_metric("evaluation/seed_stability_time_s", stab_time)
+                # Log eval artifacts
+                mlflow.log_artifact(eval_path)
+                if os.path.exists(top_path):
+                    mlflow.log_artifact(top_path)
+                if os.path.exists(bottom_path):
+                    mlflow.log_artifact(bottom_path)
+
     finally:
         shutil.rmtree(embed_temp_dir, ignore_errors=True)
 
-    return str(output_dir)
+    return {
+        "output_dir": str(output_dir),
+        "eval_result": eval_result,
+        "run_id": run_id,
+    }
 
 
 def evaluate_model(
