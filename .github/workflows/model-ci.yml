@@ -43,18 +43,6 @@ jobs:
       - name: Install Python dependencies
         run: |
           uv sync
-          # DVC with S3 support (pulls in boto3, s3fs — also needed by
-          # MLflow for its S3 artifact store).
-          uv tool install "dvc[s3]"
-      - name: Debug secrets
-        run: |
-          echo "AWS_ACCESS_KEY_ID length: ${#AWS_ACCESS_KEY_ID}"
-          echo "AWS_SECRET_ACCESS_KEY length: ${#AWS_SECRET_ACCESS_KEY}"
-          echo "ENDPOINT: '$DVC_S3_ENDPOINTURL'"
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.DVC_S3_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.DVC_S3_SECRET_KEY }}
-          DVC_S3_ENDPOINTURL: ${{ secrets.DVC_S3_ENDPOINT }}
 
       # ── Pull DVC-tracked data ──────────────────────────────────────────
       - name: Pull dataset from DVC remote
