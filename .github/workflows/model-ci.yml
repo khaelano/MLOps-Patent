@@ -103,7 +103,8 @@ jobs:
           output=$(uv run python patent/cli.py model train \
             --mlflow-experiment "ci-pr-${{ github.event.pull_request.number }}" \
             2>&1 | tee /dev/stderr)
-          run_id=$(echo "$output" | grep -oP 'MLflow run ID: \K\S+')
+          # Strip ANSI escape codes, then extract the 32-char hex run_id
+          run_id=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'MLflow run ID: \K[a-f0-9]{32}')
           if [ -z "$run_id" ]; then
             echo "ERROR: Could not extract MLflow run ID from output"
             exit 1
