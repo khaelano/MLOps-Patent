@@ -49,6 +49,9 @@ jobs:
           uv run dvc pull --verbose
 
       - name: Run tests
+        env:
+          TERM: dumb
+          COLUMNS: "120"
         run: |
           uv run pytest tests/ \
             --ignore=tests/test_data_ingestion.py \
