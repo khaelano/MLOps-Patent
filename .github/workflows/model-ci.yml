@@ -1,0 +1,207 @@
+name: Model CI
+
+on:
+  pull_request:
+    branches: [main]
+
+# ── Permissions ──────────────────────────────────────────────────────────────
+permissions:
+  contents: read
+  pull-requests: write
+
+# ── Concurrency — only one run per PR ────────────────────────────────────────
+concurrency:
+  group: model-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  train-evaluate-register:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: Patent Model & Dataset Storage
+
+    # ── Environment variables ────────────────────────────────────────────
+    env:
+      # Python
+      UV_SYSTEM_PYTHON: "1"
+      PYTHONUNBUFFERED: "1"
+      # MLflow client (connects to the server we start below)
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+
+    steps:
+      # ── Checkout ───────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── Install uv ─────────────────────────────────────────────────────
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.10"
+          enable-cache: true
+
+      # ── Install dependencies ───────────────────────────────────────────
+      - name: Install Python dependencies
+        run: |
+          uv sync
+
+      # ── Pull DVC-tracked data ──────────────────────────────────────────
+      - name: Pull dataset from DVC remote
+        env:
+          # DVC / S3
+          AWS_ACCESS_KEY_ID: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DVC_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.DVC_S3_ENDPOINT }}
+          DVC_S3_ENDPOINTURL: ${{ secrets.DVC_S3_ENDPOINT }}
+        run: |
+          uv run dvc pull --verbose
+
+      # ── Start MLflow tracking server ───────────────────────────────────
+      - name: Start MLflow server
+        env:
+          # MLflow server S3 credentials (same values as DVC, separate secrets)
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+          MLFLOW_DB_URI: ${{ secrets.MLFLOW_DB_URI }}
+          MLFLOW_S3_BUCKET: ${{ secrets.MLFLOW_S3_BUCKET }}
+        run: |
+          uv run mlflow server \
+            --backend-store-uri "${MLFLOW_DB_URI}" \
+            --default-artifact-root "s3://${MLFLOW_S3_BUCKET}/artifacts/" \
+            --host 127.0.0.1 \
+            --port 5000 \
+            > .mlflow-server.log 2>&1 &
+          echo $! > .mlflow-server.pid
+
+          # Wait for the server to become healthy
+          echo "Waiting for MLflow server..."
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:5000/api/2.0/mlflow/experiments/list > /dev/null 2>&1; then
+              echo "MLflow server is ready (attempt $i)"
+              break
+            fi
+            sleep 2
+          done
+          # Verify it's still running
+          kill -0 "$(cat .mlflow-server.pid)" 2>/dev/null || {
+            echo "MLflow server failed to start. Log:"
+            cat .mlflow-server.log
+            exit 1
+          }
+
+      # ── Train + Evaluate ───────────────────────────────────────────────
+      - name: Train and evaluate model
+        id: train
+        env:
+          MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+          # MLflow client needs S3 creds to push artifacts (model, eval, exports)
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+        run: |
+          output=$(uv run python patent/cli.py model train \
+            --mlflow-experiment "ci-pr-${{ github.event.pull_request.number }}" \
+            2>&1 | tee /dev/stderr)
+          run_id=$(echo "$output" | grep -oP 'MLflow run ID: \K\S+')
+          if [ -z "$run_id" ]; then
+            echo "ERROR: Could not extract MLflow run ID from output"
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "MLflow run completed: $run_id"
+
+      # ── Register model ─────────────────────────────────────────────────
+      - name: Register model (promote if better)
+        id: register
+        env:
+          MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+          # Registry client also needs S3 creds to resolve artifact URIs
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+        run: |
+          uv run python patent/cli.py model register \
+            "${{ steps.train.outputs.run_id }}" \
+            2>&1 | tee .register-output.log
+
+      # ── Stop MLflow server ─────────────────────────────────────────────
+      - name: Stop MLflow server
+        if: always()
+        run: |
+          if [ -f .mlflow-server.pid ]; then
+            kill "$(cat .mlflow-server.pid)" 2>/dev/null || true
+          fi
+
+      # ── Comment results on PR ──────────────────────────────────────────
+      - name: Comment PR with results
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            let body = '## 🤖 Model CI Results\n\n';
+
+            // Training step
+            const runId = '${{ steps.train.outputs.run_id }}';
+            if (runId) {
+              body += `**MLflow Run**: \`${runId}\`\n`;
+            } else {
+              body += '**Status**: ❌ Training failed\n\n';
+            }
+
+            // Registration output
+            let registerOutput = '';
+            try {
+              registerOutput = fs.readFileSync('.register-output.log', 'utf8');
+            } catch (_) { /* file may not exist */ }
+
+            if (registerOutput) {
+              const promoted = registerOutput.includes('Promoted');
+              const registered = registerOutput.includes('Registered');
+              if (promoted) {
+                body += '**Registry**: ✅ Registered & promoted to **Production**\n';
+              } else if (registered) {
+                body += '**Registry**: 📦 Registered (not promoted — metrics did not improve)\n';
+              }
+              // Extract key lines
+              const lines = registerOutput.split('\n').filter(l =>
+                l.includes('Registered') ||
+                l.includes('Promoted') ||
+                l.includes('Archived') ||
+                l.includes('improves') ||
+                l.includes('does NOT')
+              );
+              if (lines.length) {
+                body += '\n<details><summary>Registration details</summary>\n\n```\n';
+                body += lines.join('\n');
+                body += '\n```\n</details>\n';
+              }
+            }
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            // Update existing bot comment or create new one
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.startsWith('## 🤖 Model CI Results')
+            );
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }

@@ -237,8 +237,23 @@ def train_cmd(
     mlflow_experiment: str = typer.Option(
         None, "--mlflow-experiment", help="MLflow experiment name"
     ),
+    top_k: int = typer.Option(100, "--top-k", "-k", help="Number of top anomalies to export"),
+    do_subsampling: bool = typer.Option(
+        False, "--do-subsampling", help="Enable bootstrap subsampling stability (expensive)"
+    ),
+    n_workers: int = typer.Option(
+        None,
+        "--n-workers",
+        "-w",
+        help="Number of parallel workers for evaluation (default: auto)",
+    ),
 ):
-    """Train an LSHiForest model on processed embeddings."""
+    """Train an LSHiForest model on processed embeddings, then evaluate inline.
+
+    When --mlflow-experiment is provided, model params, training metrics,
+    evaluation metrics, and anomaly exports are all logged to a single
+    MLflow run.
+    """
     import json
 
     from patent.modeling.train import train_model
@@ -258,12 +273,19 @@ def train_cmd(
 
     output.mkdir(parents=True, exist_ok=True)
 
-    train_model(
+    result = train_model(
         embeddings_dir=data,
         output_dir=output,
         model_params=model_cfg,
         mlflow_context=ctx,
+        top_k=top_k,
+        do_subsampling=do_subsampling,
+        n_workers=n_workers,
     )
+
+    if result["run_id"]:
+        logger.success(f"MLflow run ID: {result['run_id']}")
+        logger.info(f"To register this model: patent model register --run-id {result['run_id']}")
 
 
 @model_app.command("evaluate")
@@ -316,6 +338,37 @@ def evaluate_cmd(
     )
 
 
+@model_app.command("register")
+def register_cmd(
+    run_id: str = typer.Argument(..., help="MLflow run ID from a completed 'model train' run"),
+    model_name: str = typer.Option(
+        "patent-lshiforest",
+        "--model-name",
+        "-n",
+        help="Registered model name in the MLflow Model Registry",
+    ),
+    metric_key: str = typer.Option(
+        "stability/jaccard_aggregated",
+        "--metric-key",
+        "-m",
+        help="Evaluation metric used to decide if the new model is better",
+    ),
+):
+    """Register a trained model to the MLflow Model Registry.
+
+    Compares the new model's evaluation metrics against the latest
+    Production version.  Always registers a new version; promotes to
+    Production only when the chosen metric improves.
+    """
+    from patent.modeling.registry import register_from_run
+
+    register_from_run(
+        run_id=run_id,
+        model_name=model_name,
+        metric_key=metric_key,
+    )
+
+
 @app.command("pipeline")
 def pipeline_cmd(
     raw: Path = typer.Option(
@@ -324,7 +377,7 @@ def pipeline_cmd(
     skip_init: bool = typer.Option(False, "--skip-init", help="Skip data download step"),
     force: bool = typer.Option(False, "--force", "-f", help="Re-run steps even if outputs exist"),
 ):
-    """Run the full pipeline: reserialize → clean → embed → train → evaluate."""
+    """Run the full pipeline: reserialize → clean → embed → train+evaluate."""
     snapshot_file = RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json.zst"
     updates_dir = RAW_DATA_DIR / "updates"
 
@@ -378,13 +431,8 @@ def pipeline_cmd(
 
     model_path = MODELS_DIR / "model.lshif"
     if force or not model_path.exists():
-        logger.info("--- Train ---")
+        logger.info("--- Train + Evaluate ---")
         train_cmd(data=PROCESSED_DATA_DIR, output=MODELS_DIR)
-
-    eval_path = MODELS_DIR / "evaluation.json"
-    if force or not eval_path.exists():
-        logger.info("--- Evaluate ---")
-        evaluate_cmd(model=model_path, data=PROCESSED_DATA_DIR, output=eval_path)
 
     logger.success("Pipeline completed.")
 

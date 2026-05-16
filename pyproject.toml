@@ -16,12 +16,15 @@ classifiers = [
     "License :: OSI Approved :: MIT License"
 ]
 dependencies = [
+    "boto3>=1.38.1",
+    "dvc[s3]>=3.67.1",
     "embed-anything>=0.7.0",
     "kaggle>=1.7.4.5",
     "loguru",
     "mlflow>=3.11.1",
     "numpy",
     "pandas",
+    "psycopg2-binary>=2.9.12",
     "pyarrow>=23.0.1",
     "python-dotenv",
     "requests>=2.33.1",
