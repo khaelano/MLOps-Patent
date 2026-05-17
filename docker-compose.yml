@@ -1,0 +1,63 @@
+services:
+  mlflow-server:
+    build:
+      context: .
+      dockerfile: docker/mlflow/Dockerfile
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri=${MLFLOW_BACKEND_STORE_URI}
+      - --default-artifact-root=${MLFLOW_ARTIFACT_ROOT}
+      - --host=0.0.0.0
+      - --port=5000
+      - --allowed-hosts=*
+    ports:
+      - "${MLFLOW_PORT:-5000}:5000"
+    environment:
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL:-}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - patent-net
+    restart: unless-stopped
+
+  inference-server:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    ports:
+      - "${INFERENCE_PORT:-8000}:8000"
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - MLFLOW_MODEL_NAME=${MLFLOW_MODEL_NAME:-patent-lshiforest}
+      - EMBEDDER_SPEC=${EMBEDDER_SPEC:-embed-anything-onnx:AllMiniLML6V2Q}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL:-}
+    volumes:
+      - embedder-cache:/app/.cache
+    depends_on:
+      mlflow-server:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - patent-net
+
+volumes:
+  embedder-cache:
+
+networks:
+  patent-net:
+    driver: bridge

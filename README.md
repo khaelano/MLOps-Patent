@@ -83,19 +83,69 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
 | `make clean`             | Delete compiled Python files and caches    |
 | `make create_environment`| Create a new uv virtual environment        |
 
+### Docker Deployment
+
+The project includes a Docker Compose stack with two services:
+
+```bash
+# Required environment variables (MLflow external PostgreSQL + S3)
+export MLFLOW_BACKEND_STORE_URI="postgresql://user:pass@host:5432/mlflow"
+export MLFLOW_ARTIFACT_ROOT="s3://your-bucket/mlflow-artifacts"
+export AWS_ACCESS_KEY_ID="..."
+export AWS_SECRET_ACCESS_KEY="..."
+export MLFLOW_S3_ENDPOINT_URL="https://s3.your-provider.com"  # if not AWS
+
+# Start the stack
+docker compose up -d
+```
+
+| Service | Port | Description |
+|---------|------|-------------|
+| `mlflow-server` | 5000 | MLflow tracking server (UI + REST API) |
+| `inference-server` | 8000 | FastAPI inference endpoint |
+
+### Inference API
+
+Once the stack is running, the inference server loads the latest **Production**
+model from the MLflow Model Registry at startup.
+
+```bash
+# Health check
+curl http://localhost:8000/health
+# → {"status":"ok","model_name":"patent-lshiforest","model_version":"1","embedder":"..."}
+
+# Score texts for anomaly
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"texts": ["A novel approach to graph neural networks"]}'
+# → {"scores":[0.123],"rescaled_scores":[0.456],"model_version":"1"}
+```
+
+Configurable via environment variables:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `MLFLOW_TRACKING_URI` | `http://127.0.0.1:5000` | MLflow server address |
+| `MLFLOW_MODEL_NAME` | `patent-lshiforest` | Registered model name |
+| `EMBEDDER_SPEC` | `embed-anything-onnx:AllMiniLML6V2Q` | Embedder backend |
+
 ## Project Organization
 
 ```
-├── LICENSE            <- Open-source license if one is chosen
+├── LICENSE            <- Open-source license
 ├── Makefile           <- Makefile with convenience commands like `make data` or `make train`
 ├── README.md          <- The top-level README for developers using this project.
+├── docker-compose.yml <- Docker Compose orchestration for MLflow + inference server
+├── docker             <- Dockerfiles (one per service)
+│   ├── app            <-   Inference server image (FastAPI + LSHiForest)
+│   └── mlflow         <-   MLflow tracking server (extends official image)
 ├── data
 │   ├── external       <- Data from third party sources.
 │   ├── interim        <- Intermediate data that has been transformed.
 │   ├── processed      <- The final, canonical data sets for modeling.
 │   └── raw            <- The original, immutable data dump.
 │
-├── docs               <- A default mkdocs project; see www.mkdocs.org for details
+├── docs               <- MkDocs-based documentation
 │
 ├── models             <- Trained and serialized models, model predictions, or model summaries
 │
@@ -103,32 +153,32 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
 │                         the creator's initials, and a short `-` delimited description, e.g.
 │                         `1.0-jqp-initial-data-exploration`.
 │
-├── pyproject.toml     <- Project configuration file with package metadata for 
-│                         patent and configuration for tools like black
+├── pyproject.toml     <- Project configuration file with package metadata and tool settings
 │
 ├── references         <- Data dictionaries, manuals, and all other explanatory materials.
 │
 ├── reports            <- Generated analysis as HTML, PDF, LaTeX, etc.
 │   └── figures        <- Generated graphics and figures to be used in reporting
 │
-├── requirements.txt   <- The requirements file for reproducing the analysis environment, e.g.
-│                         generated with `pip freeze > requirements.txt`
-│
-├── setup.cfg          <- Configuration file for flake8
-│
-└── patent   <- Source code for use in this project.
+└── patent             <- Source code for use in this project.
     │
     ├── __init__.py             <- Makes patent a Python module
     │
     ├── config.py               <- Store useful variables and configuration
     │
-    ├── dataset.py              <- Scripts to download or generate data
+    ├── api.py                  <- FastAPI inference server
+    │
+    ├── dataset/                <- Data ingestion and preprocessing
+    │   └── embedders.py        <-   Pluggable embedder abstraction
     │
     ├── features.py             <- Code to create features for modeling
     │
-    ├── modeling                
+    ├── lshiforest/             <- LSHiForest anomaly detection model
+    │
+    ├── modeling/ 
     │   ├── __init__.py 
-    │   ├── predict.py          <- Code to run model inference with trained models          
+    │   ├── evaluate.py         <- Model evaluation logic
+    │   ├── registry.py         <- MLflow model registry helpers
     │   └── train.py            <- Code to train models
     │
     └── plots.py                <- Code to create visualizations
