@@ -4,12 +4,10 @@ on:
   pull_request:
     branches: [main]
 
-# ── Permissions ──────────────────────────────────────────────────────────────
 permissions:
   contents: read
   pull-requests: write
 
-# ── Concurrency — only one run per PR ────────────────────────────────────────
 concurrency:
   group: model-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -20,7 +18,6 @@ jobs:
     timeout-minutes: 120
     environment: Patent Model & Dataset Storage
 
-    # ── Environment variables ────────────────────────────────────────────
     env:
       # Python
       UV_SYSTEM_PYTHON: "1"
@@ -29,22 +26,18 @@ jobs:
       MLFLOW_TRACKING_URI: http://127.0.0.1:5000
 
     steps:
-      # ── Checkout ───────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # ── Install uv ─────────────────────────────────────────────────────
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.10"
           enable-cache: true
 
-      # ── Install dependencies ───────────────────────────────────────────
       - name: Install Python dependencies
         run: |
           uv sync
 
-      # ── Pull DVC-tracked data ──────────────────────────────────────────
       - name: Pull dataset from DVC remote
         env:
           # DVC / S3
@@ -55,7 +48,16 @@ jobs:
         run: |
           uv run dvc pull --verbose
 
-      # ── Start MLflow tracking server ───────────────────────────────────
+      - name: Run tests
+        env:
+          TERM: dumb
+          COLUMNS: "120"
+        run: |
+          uv run pytest tests/ \
+            --ignore=tests/test_data_ingestion.py \
+            --ignore=tests/test_registry.py \
+            -q
+
       - name: Start MLflow server
         env:
           # MLflow server S3 credentials (same values as DVC, separate secrets)
@@ -89,7 +91,6 @@ jobs:
             exit 1
           }
 
-      # ── Train + Evaluate ───────────────────────────────────────────────
       - name: Train and evaluate model
         id: train
         env:
@@ -102,7 +103,8 @@ jobs:
           output=$(uv run python patent/cli.py model train \
             --mlflow-experiment "ci-pr-${{ github.event.pull_request.number }}" \
             2>&1 | tee /dev/stderr)
-          run_id=$(echo "$output" | grep -oP 'MLflow run ID: \K\S+')
+          # Strip ANSI escape codes, then extract the 32-char hex run_id
+          run_id=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g' | grep -oP 'MLflow run ID: \K[a-f0-9]{32}')
           if [ -z "$run_id" ]; then
             echo "ERROR: Could not extract MLflow run ID from output"
             exit 1
@@ -110,7 +112,6 @@ jobs:
           echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
           echo "MLflow run completed: $run_id"
 
-      # ── Register model ─────────────────────────────────────────────────
       - name: Register model (promote if better)
         id: register
         env:
@@ -124,7 +125,6 @@ jobs:
             "${{ steps.train.outputs.run_id }}" \
             2>&1 | tee .register-output.log
 
-      # ── Stop MLflow server ─────────────────────────────────────────────
       - name: Stop MLflow server
         if: always()
         run: |
@@ -132,7 +132,6 @@ jobs:
             kill "$(cat .mlflow-server.pid)" 2>/dev/null || true
           fi
 
-      # ── Comment results on PR ──────────────────────────────────────────
       - name: Comment PR with results
         if: always() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
