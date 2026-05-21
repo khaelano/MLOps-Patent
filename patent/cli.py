@@ -285,6 +285,8 @@ def train_cmd(
 
     if result["run_id"]:
         logger.success(f"MLflow run ID: {result['run_id']}")
+        if result.get("pyfunc_version"):
+            logger.success(f"Pyfunc version: {result['pyfunc_version']}")
         logger.info(f"To register this model: patent model register --run-id {result['run_id']}")
 
 
@@ -353,12 +355,18 @@ def register_cmd(
         "-m",
         help="Evaluation metric used to decide if the new model is better",
     ),
+    pyfunc_version: int | None = typer.Option(
+        None,
+        "--pyfunc-version",
+        "-v",
+        help="Pyfunc model version auto-registered during training",
+    ),
 ):
     """Register a trained model to the MLflow Model Registry.
 
     Compares the new model's evaluation metrics against the latest
-    Production version.  Always registers a new version; promotes to
-    Production only when the chosen metric improves.
+    Production version.  The model is auto-registered during training;
+    this step only compares metrics and handles promotion.
     """
     from patent.modeling.registry import register_from_run
 
@@ -366,6 +374,7 @@ def register_cmd(
         run_id=run_id,
         model_name=model_name,
         metric_key=metric_key,
+        pyfunc_version=pyfunc_version,
     )
 
 

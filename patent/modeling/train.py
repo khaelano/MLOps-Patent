@@ -10,7 +10,7 @@ from loguru import logger
 import mlflow
 import numpy as np
 
-from patent.config import CHUNK_SIZE, project_tempdir
+from patent.config import CHUNK_SIZE, PROJ_ROOT, project_tempdir
 from patent.lshiforest import LSHiForest
 from patent.modeling.evaluate import (
     analyze_score_distribution,
@@ -59,6 +59,42 @@ def process_embeddings(
     return num_dim, mmap_path
 
 
+def _log_pyfunc_model(model_path: str, model_params: dict[str, Any]) -> int | None:
+    """Log a pyfunc-flavour model, register it, and return the version number.
+
+    Called *inside* an active MLflow run.  Uses ``registered_model_name``
+    to create a new model version immediately (MLflow 3.x behaviour — the
+    model is stored as a standalone entity, not as a run artifact).
+
+    Returns the registered model version number, or ``None`` on failure.
+    """
+    from patent.modeling.pyfunc_model import DEFAULT_EMBEDDER_SPEC, LSHiForestPyfuncModel
+
+    embedder_spec = model_params.get("embedder_spec", DEFAULT_EMBEDDER_SPEC)
+    logger.info(f"Logging pyfunc model (embedder={embedder_spec})")
+
+    try:
+        model_info = mlflow.pyfunc.log_model(
+            name="pyfunc_model",
+            python_model=LSHiForestPyfuncModel(embedder_spec=embedder_spec),
+            artifacts={"model.lshif": model_path},
+            code_paths=[str(PROJ_ROOT / "patent")],
+            registered_model_name="patent-lshiforest",
+            pip_requirements=[
+                "embed-anything>=0.7.0",
+                "numpy>=1.24",
+                "pandas>=2.0",
+                "loguru>=0.7",
+            ],
+        )
+        version: Any = getattr(model_info, "registered_model_version", None)
+        logger.success(f"Pyfunc model logged and registered as version {version}")
+        return int(version) if version is not None else None
+    except Exception:
+        logger.exception("Failed to log pyfunc model")
+        return None
+
+
 def train_model(
     embeddings_dir: str | Path,
     output_dir: str | Path,
@@ -76,8 +112,8 @@ def train_model(
     logged to a single MLflow run.  When *mlflow_context* is ``None``, MLflow is
     skipped entirely.
 
-    Returns a dict with keys ``output_dir``, ``eval_result``, and ``run_id``
-    (the latter is ``None`` when MLflow is not active).
+    Returns a dict with keys ``output_dir``, ``eval_result``, ``run_id``,
+    and ``pyfunc_version`` (each is ``None`` when MLflow is not active).
     """
     logger.info(f"Training model from embeddings in {embeddings_dir}")
     embeddings_dir = Path(embeddings_dir)
@@ -97,6 +133,7 @@ def train_model(
     mmap_path = embed_temp_dir / "embeddings.mmap"
     eval_result: dict[str, Any] = {}
     run_id: str | None = None
+    pyfunc_version: int | None = None
 
     try:
         logger.info("Converting Parquet embeddings to memory-mapped array...")
@@ -142,6 +179,8 @@ def train_model(
             model.save(model_path)
             if using_mlflow:
                 mlflow.log_artifact(model_path)
+                # ── Also log as a pyfunc model for ``mlflow models build-docker`` ──
+                pyfunc_version = _log_pyfunc_model(model_path, model_params)
 
             # ── Baseline scoring ──
             t_score = time.perf_counter()
@@ -236,6 +275,7 @@ def train_model(
         "output_dir": str(output_dir),
         "eval_result": eval_result,
         "run_id": run_id,
+        "pyfunc_version": pyfunc_version,
     }
 
 
