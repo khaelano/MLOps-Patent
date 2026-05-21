@@ -9,7 +9,6 @@ from __future__ import annotations
 from typing import Any
 
 from loguru import logger
-import mlflow
 from mlflow.tracking import MlflowClient
 
 
@@ -17,24 +16,28 @@ def register_from_run(
     run_id: str,
     model_name: str = "patent-lshiforest",
     metric_key: str = "stability/jaccard_aggregated",
+    pyfunc_version: int | None = None,
 ) -> dict[str, Any]:
-    """Register a completed MLflow run's model and promote if better.
+    """Compare evaluation metrics and promote the registered pyfunc model if better.
 
-    Always creates a new registered model version from the model artifact
-    logged during training.  Then compares *metric_key* against the latest
-    Production version's value.  If the new value is higher, the new version
-    is transitioned to **Production** and the previous Production version is
-    archived.
+    The model must already be registered via ``mlflow.pyfunc.log_model`` with
+    ``registered_model_name`` (which creates the version automatically in
+    MLflow 3.x).  This function compares *metric_key* against the latest
+    Production version and transitions stages accordingly.
 
     Parameters
     ----------
     run_id : str
-        MLflow run ID from a completed ``model train`` invocation.
+        MLflow run ID from a completed ``model train`` invocation (used to
+        read evaluation metrics).
     model_name : str
         Name used in the MLflow Model Registry.
     metric_key : str
         Flattened evaluation metric key logged during training
-        (default ``"stability/jaccard_aggregated"``).
+        (default ``\"stability/jaccard_aggregated\"``).
+    pyfunc_version : int | None
+        The version number that was auto-created by ``log_model``.  If
+        ``None`` the latest non-Production version is used as a fallback.
 
     Returns
     -------
@@ -44,7 +47,6 @@ def register_from_run(
         ``previous_metric_value``.
     """
     client = MlflowClient()
-    artifact_uri = f"runs:/{run_id}/model.lshif"
 
     # ── Retrieve the new model's evaluation metric from the run ──────────
     run = client.get_run(run_id)
@@ -57,31 +59,30 @@ def register_from_run(
         )
         new_metric = 0.0
 
-    logger.info(
-        f"Registering model '{model_name}' from run {run_id} ({metric_key}={new_metric:.4f})"
-    )
-
-    # ── Register the new version ─────────────────────────────────────────
-    try:
-        result = mlflow.register_model(model_uri=artifact_uri, name=model_name)
-    except Exception:
-        # mlflow.register_model may raise if the model name doesn't exist yet;
-        # MlflowClient.create_model_version + create_registered_model
-        # handles the first-registration edge-case.
-        logger.info("Model name may not exist yet — creating via MlflowClient...")
-        try:
-            client.create_registered_model(model_name)
-        except Exception:
-            # Already exists (race) — ignore
-            pass
-        result = client.create_model_version(
-            name=model_name,
-            source=artifact_uri,
-            run_id=run_id,
+    # ── Resolve the version to compare ────────────────────────────────────
+    if pyfunc_version is not None:
+        new_version = str(pyfunc_version)
+        logger.info(
+            f"Using pyfunc model v{new_version} for '{model_name}' ({metric_key}={new_metric:.4f})"
         )
-
-    new_version = result.version
-    logger.success(f"Registered {model_name} version {new_version}")
+    else:
+        # Fallback: find the latest version that isn't Production
+        all_versions = client.search_model_versions(f"name='{model_name}'")
+        non_prod = [v for v in all_versions if v.current_stage != "Production"]
+        if non_prod:
+            new_version = non_prod[-1].version
+        else:
+            logger.error(f"No non-Production version found for '{model_name}'")
+            return {
+                "model_name": model_name,
+                "version": "0",
+                "metric_key": metric_key,
+                "metric_value": new_metric,
+                "promoted_to_production": False,
+                "previous_prod_version": None,
+                "previous_metric_value": None,
+            }
+        logger.warning(f"No pyfunc_version provided — using latest v{new_version}")
 
     # ── Compare with latest Production version ───────────────────────────
     latest_prod = client.get_latest_versions(model_name, stages=["Production"])

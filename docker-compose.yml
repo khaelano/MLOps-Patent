@@ -34,24 +34,30 @@ services:
     restart: unless-stopped
 
   inference-server:
-    build:
-      context: .
-      dockerfile: docker/app/Dockerfile
+    image: ghcr.io/khaelano/mlops-patent:latest
     ports:
       - "${INFERENCE_PORT:-8000}:8000"
     environment:
-      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
-      - MLFLOW_MODEL_NAME=${MLFLOW_MODEL_NAME:-patent-lshiforest}
-      - EMBEDDER_SPEC=${EMBEDDER_SPEC:-embed-anything-onnx:AllMiniLML6V2Q}
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL:-}
+      - DISABLE_NGINX=true
+      - MLFLOW_MODELS_HOST=0.0.0.0
+      - HF_HOME=/app/.cache/huggingface
     volumes:
       - embedder-cache:/app/.cache
-    depends_on:
-      mlflow-server:
-        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/ping')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
     restart: unless-stopped
+    deploy:
+      replicas: 3
     networks:
       - patent-net
 

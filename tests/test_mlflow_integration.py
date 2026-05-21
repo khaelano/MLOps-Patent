@@ -191,7 +191,7 @@ class TestEvaluateModelMlflow:
 class TestModelRegistry:
     @patch("patent.modeling.registry.MlflowClient")
     def test_register_from_run_creates_version_and_promotes(self, MockClient):
-        """Happy-path: no existing Production version → registers + promotes."""
+        """Happy-path: no existing Production version → promotes."""
         mock_client = MockClient.return_value
 
         # Simulate: run exists with a jaccard metric
@@ -202,14 +202,11 @@ class TestModelRegistry:
         # No existing Production versions
         mock_client.get_latest_versions.return_value = []
 
-        # create_model_version returns a mock
-        mock_version = mock_client.create_model_version.return_value
-        mock_version.version = "3"
-
         result = register_from_run(
             run_id="fake-run-id",
             model_name="patent-lshiforest",
             metric_key="stability/jaccard_aggregated",
+            pyfunc_version=3,
         )
 
         assert result["model_name"] == "patent-lshiforest"
@@ -225,7 +222,7 @@ class TestModelRegistry:
 
     @patch("patent.modeling.registry.MlflowClient")
     def test_register_worse_model_not_promoted(self, MockClient):
-        """When new metric ≤ Production metric, register but don't promote."""
+        """When new metric ≤ Production metric, don't promote."""
         mock_client = MockClient.return_value
 
         mock_client.get_run.return_value.data.metrics = {
@@ -246,10 +243,7 @@ class TestModelRegistry:
             mock_prod_run,  # second call: production run
         ]
 
-        mock_version = mock_client.create_model_version.return_value
-        mock_version.version = "3"
-
-        result = register_from_run(run_id="fake-run-id")
+        result = register_from_run(run_id="fake-run-id", pyfunc_version=3)
 
         assert result["promoted_to_production"] is False
         assert result["previous_prod_version"] == "2"
@@ -285,10 +279,7 @@ class TestModelRegistry:
             mock_prod_run,
         ]
 
-        mock_version = mock_client.create_model_version.return_value
-        mock_version.version = "2"
-
-        result = register_from_run(run_id="fake-run-id")
+        result = register_from_run(run_id="fake-run-id", pyfunc_version=2)
 
         assert result["promoted_to_production"] is True
 
@@ -310,10 +301,7 @@ class TestModelRegistry:
         mock_client.get_run.return_value.data.metrics = {"other_metric": 0.5}
         mock_client.get_latest_versions.return_value = []
 
-        mock_version = mock_client.create_model_version.return_value
-        mock_version.version = "1"
-
-        result = register_from_run(run_id="fake-run-id")
+        result = register_from_run(run_id="fake-run-id", pyfunc_version=1)
 
         assert result["metric_value"] == 0.0  # fallback
         assert result["promoted_to_production"] is True  # promotes default

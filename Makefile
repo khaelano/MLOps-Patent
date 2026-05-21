@@ -112,6 +112,25 @@ model-train: requirements
 model-evaluate: requirements
 	uv run $(PYTHON_INTERPRETER) patent/cli.py model evaluate $(MODEL) $(DATA) $(OUTPUT)
 
+## Build Docker image from production MLflow model and push to GHCR
+.PHONY: docker-build
+docker-build:
+	@test -f .env || { echo "Error: .env file not found."; exit 1; }
+	set -a && . ./.env && set +a && \
+		uv run mlflow models build-docker \
+			--model-uri "models:/$${MLFLOW_MODEL_NAME:-patent-lshiforest}/Production" \
+			--name "ghcr.io/khaelano/mlops-patent:latest" \
+			--env-manager local
+
+## Push the built Docker image to GHCR (requires `docker login ghcr.io`)
+.PHONY: docker-push
+docker-push:
+	docker push ghcr.io/khaelano/mlops-patent:latest
+
+## Build and push: docker-build → docker-push
+.PHONY: docker-release
+docker-release: docker-build docker-push
+
 ## Run the full pipeline: reserialize -> clean -> embed -> reduce -> train -> evaluate
 .PHONY: pipeline
 pipeline: requirements
