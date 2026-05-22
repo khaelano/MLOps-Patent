@@ -85,7 +85,7 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
 
 ### Docker Deployment
 
-The project includes a Docker Compose stack with two services:
+The project includes a Docker Compose stack with three services:
 
 ```bash
 # Required environment variables (MLflow external PostgreSQL + S3)
@@ -95,39 +95,76 @@ export AWS_ACCESS_KEY_ID="..."
 export AWS_SECRET_ACCESS_KEY="..."
 export MLFLOW_S3_ENDPOINT_URL="https://s3.your-provider.com"  # if not AWS
 
-# Start the stack
+# Start the stack (3 inference replicas + load balancer)
 docker compose up -d
 ```
 
-| Service | Port | Description |
-|---------|------|-------------|
-| `mlflow-server` | 5000 | MLflow tracking server (UI + REST API) |
-| `inference-server` | 8000 | FastAPI inference endpoint |
+| Service | Port | Replicas | Description |
+|---------|------|----------|-------------|
+| `mlflow-server` | 5000 | 1 | MLflow tracking server (UI + REST API) |
+| `inference-server` | — (internal) | 3 | LSHiForest model served via MLflow pyfunc |
+| `inference-lb` | 8000 | 1 | Nginx load balancer → inference-server replicas |
+
+#### Scaling replicas dynamically
+
+Add or remove inference-server replicas at runtime **without downtime**:
+
+```bash
+# Scale up to 5 replicas
+docker compose up -d --scale inference-server=5
+
+# Scale down to 2 replicas
+docker compose up -d --scale inference-server=2
+```
+
+The load balancer automatically detects new replicas via Docker's internal DNS.
+The embedder ONNX model cache is shared across replicas (`embedder-cache` volume)
+so only the first replica downloads the model from HuggingFace.
 
 ### Inference API
 
 Once the stack is running, the inference server loads the latest **Production**
-model from the MLflow Model Registry at startup.
+model from the MLflow Model Registry (baked into the Docker image at build time).
 
 ```bash
-# Health check
+# Health check (model liveness)
+curl http://localhost:8000/ping
+# → 200 (empty body)
+
+# LB health check
 curl http://localhost:8000/health
-# → {"status":"ok","model_name":"patent-lshiforest","model_version":"1","embedder":"..."}
+# → OK
 
 # Score texts for anomaly
-curl -X POST http://localhost:8000/predict \
+curl -X POST http://localhost:8000/invocations \
   -H "Content-Type: application/json" \
-  -d '{"texts": ["A novel approach to graph neural networks"]}'
-# → {"scores":[0.123],"rescaled_scores":[0.456],"model_version":"1"}
+  -d '{
+    "dataframe_records": [
+      {"texts": "A novel approach to graph neural networks"},
+      {"texts": "Standard survey of existing NLP methods"}
+    ]
+  }'
+# → {"predictions":[
+#     {"scores":0.6448,"rescaled_scores":0.0},
+#     {"scores":0.6949,"rescaled_scores":1.0}
+#   ]}
 ```
 
-Configurable via environment variables:
+For the full API reference (both request formats, Python example), see
+[docs/api.md](docs/api.md).
+
+| Field | Type | Range | Description |
+|---|---|---|---|
+| `scores` | float | [0, 1] | Raw LSHiForest anomaly score — higher = more anomalous |
+| `rescaled_scores` | float | [0, 1] | Percentile-rescaled for interpretability |
+
+Configurable via `.env`:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MLFLOW_TRACKING_URI` | `http://127.0.0.1:5000` | MLflow server address |
 | `MLFLOW_MODEL_NAME` | `patent-lshiforest` | Registered model name |
-| `EMBEDDER_SPEC` | `embed-anything-onnx:AllMiniLML6V2Q` | Embedder backend |
+| `INFERENCE_PORT` | `8000` | Host port for the inference API |
 
 ## Project Organization
 
@@ -136,9 +173,9 @@ Configurable via environment variables:
 ├── Makefile           <- Makefile with convenience commands like `make data` or `make train`
 ├── README.md          <- The top-level README for developers using this project.
 ├── docker-compose.yml <- Docker Compose orchestration for MLflow + inference server
-├── docker             <- Dockerfiles (one per service)
-│   ├── app            <-   Inference server image (FastAPI + LSHiForest)
-│   └── mlflow         <-   MLflow tracking server (extends official image)
+├── docker             <- Dockerfiles and configs (one per service)
+│   ├── mlflow         <-   MLflow tracking server (extends official image)
+│   └── nginx          <-   Nginx load-balancer config for inference replicas
 ├── data
 │   ├── external       <- Data from third party sources.
 │   ├── interim        <- Intermediate data that has been transformed.
