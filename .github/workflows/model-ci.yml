@@ -229,6 +229,7 @@ jobs:
     env:
       UV_SYSTEM_PYTHON: "1"
       PYTHONUNBUFFERED: "1"
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
 
     steps:
       - uses: actions/checkout@v4
@@ -243,6 +244,36 @@ jobs:
         run: |
           uv sync
 
+      - name: Start MLflow server
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+          MLFLOW_DB_URI: ${{ secrets.MLFLOW_DB_URI }}
+          MLFLOW_S3_BUCKET: ${{ secrets.MLFLOW_S3_BUCKET }}
+        run: |
+          uv run mlflow server \
+            --backend-store-uri "${MLFLOW_DB_URI}" \
+            --default-artifact-root "s3://${MLFLOW_S3_BUCKET}/artifacts/" \
+            --host 127.0.0.1 \
+            --port 5000 \
+            > .mlflow-server.log 2>&1 &
+          echo $! > .mlflow-server.pid
+
+          echo "Waiting for MLflow server..."
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:5000/api/2.0/mlflow/experiments/list > /dev/null 2>&1; then
+              echo "MLflow server is ready (attempt $i)"
+              break
+            fi
+            sleep 2
+          done
+          kill -0 "$(cat .mlflow-server.pid)" 2>/dev/null || {
+            echo "MLflow server failed to start. Log:"
+            cat .mlflow-server.log
+            exit 1
+          }
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -252,8 +283,6 @@ jobs:
 
       - name: Build and push Docker image
         env:
-          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
-          # MLflow client needs S3 creds to download the Production model
           AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
           AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
@@ -264,10 +293,16 @@ jobs:
             --name "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest" \
             --env-manager local
 
-          # Also tag with the commit SHA for traceability
           docker tag \
             "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest" \
             "ghcr.io/${{ github.repository_owner }}/mlops-patent:${{ github.sha }}"
 
           docker push "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest"
           docker push "ghcr.io/${{ github.repository_owner }}/mlops-patent:${{ github.sha }}"
+
+      - name: Stop MLflow server
+        if: always()
+        run: |
+          if [ -f .mlflow-server.pid ]; then
+            kill "$(cat .mlflow-server.pid)" 2>/dev/null || true
+          fi
