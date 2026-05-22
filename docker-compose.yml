@@ -35,11 +35,29 @@ services:
 
   inference-server:
     image: ghcr.io/khaelano/mlops-patent:latest
-    ports:
-      - "${INFERENCE_PORT:-8000}:8000"
+    # ── Inline entrypoint: monkey-patch MLflow's scoring server to bind 0.0.0.0 ──
+    # MLflow 3.11.1 container _serve() does not pass --host to uvicorn, so
+    # uvicorn defaults to 127.0.0.1 and the container is unreachable from
+    # outside.  This wrapper patches scoring_server.get_cmd to inject the host.
+    entrypoint:
+      - python
+      - -c
+      - |
+        from mlflow.models import container as C
+        from mlflow.pyfunc import scoring_server
+
+        _orig_get_cmd = scoring_server.get_cmd
+
+        def _patched_get_cmd(*args, **kwargs):
+            kwargs.setdefault("host", "0.0.0.0")
+            return _orig_get_cmd(*args, **kwargs)
+
+        scoring_server.get_cmd = _patched_get_cmd
+        C._serve("local")
+    deploy:
+      replicas: 3
     environment:
       - DISABLE_NGINX=true
-      - MLFLOW_MODELS_HOST=0.0.0.0
       - HF_HOME=/app/.cache/huggingface
     volumes:
       - embedder-cache:/app/.cache
@@ -54,10 +72,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 60s
+      start_period: 300s
     restart: unless-stopped
-    deploy:
-      replicas: 3
+    networks:
+      - patent-net
+
+  # ── Nginx load-balancer in front of inference-server replicas ──────────
+  inference-lb:
+    image: nginx:stable-alpine
+    ports:
+      - "${INFERENCE_PORT:-8000}:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro,Z
+    restart: unless-stopped
     networks:
       - patent-net
 
