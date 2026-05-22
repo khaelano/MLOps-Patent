@@ -17,6 +17,8 @@
   },
   "features": {
     "ghcr.io/devcontainers/features/sshd:1": {},
-    "ghcr.io/devcontainers/features/docker-in-docker:3": {}
+    "ghcr.io/devcontainers/features/docker-in-docker:3": {
+      "moby": false
+    }
   }
 }
