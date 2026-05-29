@@ -1,0 +1,34 @@
+# ── Prometheus scraping configuration ──────────────────────────────────────
+#
+# Targets (all on the patent-net Docker bridge network):
+#   - inference-server:8000/metrics  →  model API metrics (DNS SD for replicas)
+#   - prometheus:9090/metrics        →  self-monitoring
+#
+# Reload without restart:
+#   docker compose exec prometheus kill -HUP 1
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+# ── Scrape targets ─────────────────────────────────────────────────────────
+
+scrape_configs:
+  # ── Model inference API (Prometheus-instrumented FastAPI app) ─────────
+  - job_name: "inference-server"
+    metrics_path: "/metrics"
+    # DNS service discovery resolves 'inference-server' to all replica IPs
+    # so Prometheus scrapes each replica independently.
+    dns_sd_configs:
+      - names:
+          - "inference-server"
+        type: "A"
+        port: 8000
+        refresh_interval: 30s
+
+  # ── Prometheus self-monitoring ────────────────────────────────────────
+  - job_name: "prometheus"
+    static_configs:
+      - targets:
+          - "prometheus:9090"

@@ -34,45 +34,15 @@ services:
     restart: unless-stopped
 
   inference-server:
-    image: ghcr.io/khaelano/mlops-patent:latest
-    # ── Inline entrypoint: monkey-patch MLflow's scoring server to bind 0.0.0.0 ──
-    # MLflow 3.11.1 container _serve() does not pass --host to uvicorn, so
-    # uvicorn defaults to 127.0.0.1 and the container is unreachable from
-    # outside.  This wrapper patches scoring_server.get_cmd to inject the host.
-    entrypoint:
-      - python
-      - -c
-      - |
-        from mlflow.models import container as C
-        from mlflow.pyfunc import scoring_server
-
-        _orig_get_cmd = scoring_server.get_cmd
-
-        def _patched_get_cmd(*args, **kwargs):
-            kwargs.setdefault("host", "0.0.0.0")
-            return _orig_get_cmd(*args, **kwargs)
-
-        scoring_server.get_cmd = _patched_get_cmd
-        C._serve("local")
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
     deploy:
       replicas: 3
     environment:
-      - DISABLE_NGINX=true
-      - HF_HOME=/app/.cache/huggingface
+      - HF_HOME=/app/.cache
     volumes:
       - embedder-cache:/app/.cache
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/ping')",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 300s
     restart: unless-stopped
     networks:
       - patent-net
@@ -88,8 +58,47 @@ services:
     networks:
       - patent-net
 
+  # ── Prometheus metrics scraper ───────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v3.8.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    networks:
+      - patent-net
+
+  # ── Grafana dashboard ────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:12.4.3
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_AUTH_ANONYMOUS_ENABLED=false
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./docker/grafana/datasources:/etc/grafana/provisioning/datasources:ro,Z
+      - ./docker/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro,Z
+      - grafana-data:/var/lib/grafana
+    restart: unless-stopped
+    networks:
+      - patent-net
+    depends_on:
+      - prometheus
+
 volumes:
   embedder-cache:
+  prometheus-data:
+  grafana-data:
 
 networks:
   patent-net:
