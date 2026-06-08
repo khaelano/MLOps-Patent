@@ -1,0 +1,305 @@
+name: Continuous Training
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"
+
+  workflow_dispatch:
+    inputs:
+      trigger_type:
+        description: "Jenis pemicu"
+        required: true
+        type: choice
+        options:
+          - manual
+          - data_drift
+          - data_arrival
+      force:
+        description: "Paksa retraining meskipun metrik tidak berubah?"
+        required: false
+        type: boolean
+        default: false
+
+  repository_dispatch:
+    types:
+      - ct-data-drift-trigger
+      - ct-data-arrival-trigger
+      - ct-trigger
+
+permissions:
+  contents: write
+  packages: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: continuous-training-${{ github.event_name }}-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════
+  # CT Pipeline: data-update → reserialize → clean → embed → train → evaluate → register
+  # ═══════════════════════════════════════════════════════════════════════
+  continuous-training:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment: Patent Model & Dataset Storage
+
+    env:
+      UV_SYSTEM_PYTHON: "1"
+      PYTHONUNBUFFERED: "1"
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine trigger source
+        id: trigger
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "source=schedule" >> "$GITHUB_OUTPUT"
+            echo "type=data_arrival" >> "$GITHUB_OUTPUT"
+            echo "label=Scheduled (Minggu 02:00 UTC)" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "source=workflow_dispatch" >> "$GITHUB_OUTPUT"
+            echo "type=${{ github.event.inputs.trigger_type }}" >> "$GITHUB_OUTPUT"
+            echo "label=Manual (${{ github.event.inputs.trigger_type }})" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "repository_dispatch" ]; then
+            echo "source=repository_dispatch" >> "$GITHUB_OUTPUT"
+            TYPE="${{ github.event.action }}"
+            # Map event type to trigger type
+            case "$TYPE" in
+              ct-data-drift-trigger) TRIGGER="data_drift" ;;
+              ct-data-arrival-trigger) TRIGGER="data_arrival" ;;
+              *) TRIGGER="unknown" ;;
+            esac
+            echo "type=$TRIGGER" >> "$GITHUB_OUTPUT"
+            echo "label=Alertmanager ($TRIGGER)" >> "$GITHUB_OUTPUT"
+          else
+            echo "source=push" >> "$GITHUB_OUTPUT"
+            echo "type=push" >> "$GITHUB_OUTPUT"
+            echo "label=Push to main" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.10"
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: uv sync
+
+      - name: Pull latest data from DVC remote
+        id: dvc_pull
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DVC_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.DVC_S3_ENDPOINT }}
+          DVC_S3_ENDPOINTURL: ${{ secrets.DVC_S3_ENDPOINT }}
+        run: |
+          echo "Pulling data from DVC remote..."
+          uv run dvc pull --verbose 2>&1 | tee .dvc-pull.log
+          # Check if any new data was pulled
+          if grep -q "Checking" .dvc-pull.log && ! grep -q "Everything is up to date" .dvc-pull.log; then
+            echo "new_data=true" >> "$GITHUB_OUTPUT"
+            echo "New data pulled from DVC"
+          elif grep -q "Everything is up to date" .dvc-pull.log; then
+            echo "new_data=false" >> "$GITHUB_OUTPUT"
+            echo "DVC already up to date"
+          else
+            echo "new_data=true" >> "$GITHUB_OUTPUT"
+            echo "Data pull completed (status unclear, proceeding)"
+          fi
+
+      - name: Check if training should proceed
+        id: gate
+        run: |
+          FORCE="${{ github.event.inputs.force || 'false' }}"
+          NEW_DATA="${{ steps.dvc_pull.outputs.new_data }}"
+          SOURCE="${{ steps.trigger.outputs.source }}"
+
+          echo "Trigger source: $SOURCE"
+          echo "Force: $FORCE"
+          echo "New data: $NEW_DATA"
+
+          if [ "$FORCE" = "true" ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Force flag set" >> "$GITHUB_OUTPUT"
+          elif [ "$SOURCE" = "schedule" ] && [ "$NEW_DATA" != "true" ]; then
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+            echo "reason=No new data for scheduled run (skip)" >> "$GITHUB_OUTPUT"
+          else
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+            echo "reason=Triggered by $SOURCE (${{ steps.trigger.outputs.type }})" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Prepare dataset
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          echo "Preparing dataset for training..."
+          # Run the full pipeline to ensure data is in processed form
+          uv run python patent/cli.py pipeline --skip-init --force
+
+      - name: Start MLflow server
+        if: steps.gate.outputs.proceed == 'true'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+          MLFLOW_DB_URI: ${{ secrets.MLFLOW_DB_URI }}
+          MLFLOW_S3_BUCKET: ${{ secrets.MLFLOW_S3_BUCKET }}
+        run: |
+          uv run mlflow server \
+            --backend-store-uri "${MLFLOW_DB_URI}" \
+            --default-artifact-root "s3://${MLFLOW_S3_BUCKET}/artifacts/" \
+            --host 127.0.0.1 \
+            --port 5000 \
+            > .mlflow-server.log 2>&1 &
+          echo $! > .mlflow-server.pid
+
+          echo "Waiting for MLflow server..."
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:5000/api/2.0/mlflow/experiments/list > /dev/null 2>&1; then
+              echo "MLflow server is ready (attempt $i)"
+              break
+            fi
+            sleep 2
+          done
+          kill -0 "$(cat .mlflow-server.pid)" 2>/dev/null || {
+            echo "MLflow server failed to start. Log:"
+            cat .mlflow-server.log
+            exit 1
+          }
+
+      - name: Train and evaluate model
+        if: steps.gate.outputs.proceed == 'true'
+        id: train
+        env:
+          MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+        run: |
+          TRIGGER_TYPE="${{ steps.trigger.outputs.type }}"
+          TIMESTAMP=$(date -u +%Y%m%dT%H%M%S)
+          EXPERIMENT_NAME="ct-${TRIGGER_TYPE}-${TIMESTAMP}"
+
+          echo "Training with experiment: ${EXPERIMENT_NAME}"
+          echo "Trigger: ${{ steps.trigger.outputs.label }}"
+
+          output=$(uv run python patent/cli.py model train \
+            --mlflow-experiment "${EXPERIMENT_NAME}" \
+            2>&1 | tee /dev/stderr)
+
+          # Extract run ID and pyfunc version
+          clean=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
+          run_id=$(echo "$clean" | grep -oP 'MLflow run ID: \K[a-f0-9]{32}')
+          pyfunc_version=$(echo "$clean" | grep -oP 'Pyfunc version: \K\d+')
+
+          if [ -z "$run_id" ]; then
+            echo "ERROR: Could not extract MLflow run ID"
+            exit 1
+          fi
+
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "pyfunc_version=${pyfunc_version:-}" >> "$GITHUB_OUTPUT"
+          echo "experiment_name=${EXPERIMENT_NAME}" >> "$GITHUB_OUTPUT"
+
+          echo "MLflow run completed: $run_id (pyfunc v${pyfunc_version:-?})"
+
+      - name: Register model (promote only if better)
+        if: steps.gate.outputs.proceed == 'true'
+        id: register
+        env:
+          MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+        run: |
+          pyfunc_ver="${{ steps.train.outputs.pyfunc_version }}"
+          pyfunc_arg=""
+          if [ -n "$pyfunc_ver" ]; then
+            pyfunc_arg="--pyfunc-version $pyfunc_ver"
+          fi
+
+          echo "Registering model with comparative evaluation..."
+          uv run python patent/cli.py model register \
+            "${{ steps.train.outputs.run_id }}" \
+            $pyfunc_arg \
+            2>&1 | tee .register-output.log
+
+          # Parse promotion status
+          if grep -q "Promoted" .register-output.log; then
+            echo "promoted=true" >> "$GITHUB_OUTPUT"
+            echo "Model PROMOTED to Production"
+          elif grep -q "does NOT" .register-output.log; then
+            echo "promoted=false" >> "$GITHUB_OUTPUT"
+            echo "Model NOT promoted (did not improve)"
+          else
+            echo "promoted=true" >> "$GITHUB_OUTPUT"
+            echo "Model registered (first version or fallback)"
+          fi
+
+      - name: Export comparative evaluation report
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          mkdir -p reports
+          cat > reports/ct-evaluation-report.md << 'REPORT_EOF'
+          # Continuous Training Evaluation Report
+
+          **Tanggal**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          **Trigger**: ${{ steps.trigger.outputs.label }}
+          **Source**: ${{ steps.trigger.outputs.source }}
+
+          ## Detail Eksekusi
+
+          | Item | Nilai |
+          |------|-------|
+          | MLflow Run ID | `${{ steps.train.outputs.run_id }}` |
+          | Pyfunc Version | `${{ steps.train.outputs.pyfunc_version }}` |
+          | Experiment | `${{ steps.train.outputs.experiment_name }}` |
+          | Gate Reason | ${{ steps.gate.outputs.reason }} |
+
+          ## Hasil Evaluasi Komparatif
+
+          $(cat .register-output.log 2>/dev/null | sed 's/^/    /')
+
+          ## Status
+
+          - **Promosi ke Production**: ${{ steps.register.outputs.promoted == 'true' && '✅ BERHASIL' || '❌ TIDAK DIPROMOSIKAN' }}
+          - **Alasan**: ${{ steps.gate.outputs.reason }}
+
+          REPORT_EOF
+
+          echo "Evaluation report written to reports/ct-evaluation-report.md"
+          cat reports/ct-evaluation-report.md
+
+      - name: Upload evaluation report as artifact
+        if: steps.gate.outputs.proceed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ct-evaluation-report
+          path: |
+            reports/ct-evaluation-report.md
+            .register-output.log
+            .dvc-pull.log
+          retention-days: 30
+
+      - name: Stop MLflow server
+        if: always()
+        run: |
+          if [ -f .mlflow-server.pid ]; then
+            kill "$(cat .mlflow-server.pid)" 2>/dev/null || true
+          fi
+
+      - name: Notify completion
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          echo "══════════════════════════════════════════════════════════"
+          echo "  Continuous Training Pipeline — SELESAI"
+          echo "══════════════════════════════════════════════════════════"
+          echo "  Trigger:   ${{ steps.trigger.outputs.label }}"
+          echo "  Run ID:    ${{ steps.train.outputs.run_id }}"
+          echo "  Promoted:  ${{ steps.register.outputs.promoted }}"
+          echo "══════════════════════════════════════════════════════════"

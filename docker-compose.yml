@@ -58,7 +58,7 @@ services:
     networks:
       - patent-net
 
-  # ── Prometheus metrics scraper ───────────────────────────────────────────
+  # ── Prometheus metrics scraper + alerting ──────────────────────────────
   prometheus:
     image: prom/prometheus:v3.8.0
     command:
@@ -70,12 +70,47 @@ services:
       - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - ./docker/prometheus/alerting_rules.yml:/etc/prometheus/alerting_rules.yml:ro,Z
       - prometheus-data:/prometheus
     restart: unless-stopped
     networks:
       - patent-net
 
-  # ── Grafana dashboard ────────────────────────────────────────────────────
+  # ── Alertmanager — menerima alert dari Prometheus ──────────────────────
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yml"
+      - "--storage.path=/alertmanager"
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./docker/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro,Z
+      - alertmanager-data:/alertmanager
+    restart: unless-stopped
+    networks:
+      - patent-net
+    depends_on:
+      - prometheus
+
+  # ── Webhook relay — Alertmanager → GitHub repository_dispatch ──────────
+  alertmanager-webhook:
+    build:
+      context: .
+      dockerfile: docker/webhook/Dockerfile
+    environment:
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITHUB_REPO=${GITHUB_REPO:-khaelano/MLOps-Patent}
+      - WEBHOOK_PORT=8080
+    ports:
+      - "${WEBHOOK_PORT:-8080}:8080"
+    restart: unless-stopped
+    networks:
+      - patent-net
+    depends_on:
+      - alertmanager
+
+  # ── Grafana dashboard ──────────────────────────────────────────────────
   grafana:
     image: grafana/grafana:12.4.3
     environment:
@@ -98,6 +133,7 @@ services:
 volumes:
   embedder-cache:
   prometheus-data:
+  alertmanager-data:
   grafana-data:
 
 networks:

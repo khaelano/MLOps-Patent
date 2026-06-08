@@ -117,7 +117,6 @@ def _init_prometheus_metrics() -> None:
 
 
 def _record_prediction_metrics(raw_scores: np.ndarray, rescaled: np.ndarray) -> None:
-    """Record per-prediction metrics (no-op when prometheus_client is absent)."""
     if _PREDICTION_COUNT is not None:
         _PREDICTION_COUNT.inc(len(raw_scores))
     if _PREDICTION_SCORE_HIST is not None:

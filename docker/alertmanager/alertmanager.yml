@@ -1,0 +1,27 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  receiver: "github-ct-webhook"
+  group_by: ["alertname", "trigger_type"]
+  group_wait: 10s
+  group_interval: 5m
+  repeat_interval: 1h
+  routes:
+    - match:
+        trigger_type: data_drift
+      receiver: "github-ct-webhook"
+      group_wait: 10s
+    - match:
+        trigger_type: data_arrival
+      receiver: "github-ct-webhook"
+      group_wait: 30s
+
+receivers:
+  - name: "github-ct-webhook"
+    webhook_configs:
+      - url: "http://alertmanager-webhook:8080/webhook"
+        send_resolved: true
+        max_alerts: 0
+        http_config:
+          follow_redirects: true

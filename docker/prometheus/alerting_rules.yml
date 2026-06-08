@@ -1,0 +1,30 @@
+groups:
+  - name: patent_model_monitoring
+    interval: 30s
+    rules:
+      - alert: AnomalyScoreDistributionShift
+        expr: |
+          (
+            rate(patent_anomaly_score_bucket{le="0.9"}[15m])
+            /
+            rate(patent_anomaly_score_bucket{le="+Inf"}[15m])
+          ) < 0.3
+        for: 10m
+        labels:
+          severity: warning
+          component: model
+          trigger_type: data_drift
+        annotations:
+          summary: "Data Drift — distribusi skor bergeser signifikan"
+          description: "Proporsi skor < 0.9 di bawah 30% — perubahan distribusi data input"
+
+      - alert: NewDataDetected
+        expr: |
+          changes(patent_predictions_total[30m]) > 100
+        for: 1m
+        labels:
+          severity: info
+          component: data
+          trigger_type: data_arrival
+        annotations:
+          summary: "Aktivitas prediksi tinggi — kemungkinan data baru masuk"
