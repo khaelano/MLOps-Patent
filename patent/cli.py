@@ -231,17 +231,17 @@ def train_cmd(
     eta: float = typer.Option(
         0.0, "--eta", help="Granularity: 0=local anomalies, 1=global anomalies"
     ),
-    params: Path = typer.Option(
+    params: Path | None = typer.Option(
         None, "--params", "-p", help="JSON file with additional model params"
     ),
-    mlflow_experiment: str = typer.Option(
+    mlflow_experiment: str | None = typer.Option(
         None, "--mlflow-experiment", help="MLflow experiment name"
     ),
     top_k: int = typer.Option(100, "--top-k", "-k", help="Number of top anomalies to export"),
     do_subsampling: bool = typer.Option(
         False, "--do-subsampling", help="Enable bootstrap subsampling stability (expensive)"
     ),
-    n_workers: int = typer.Option(
+    n_workers: int | None = typer.Option(
         None,
         "--n-workers",
         "-w",
@@ -440,12 +440,26 @@ def pipeline_cmd(
                 file_path=cleaned_path,
                 output_path=processed_path,
                 embedder_spec="embed-anything-onnx:AllMiniLML6V2Q",
+                batch_size=100_000,
             )
 
     model_path = MODELS_DIR / "model.lshif"
     if force or not model_path.exists():
         logger.info("--- Train + Evaluate ---")
-        train_cmd(data=PROCESSED_DATA_DIR, output=MODELS_DIR)
+        train_cmd(
+            data=PROCESSED_DATA_DIR,
+            output=MODELS_DIR,
+            num_trees=200,
+            max_depth=21,
+            seed=42,
+            lsh_family="l2",
+            eta=0.0,
+            params=None,
+            mlflow_experiment=None,
+            top_k=100,
+            do_subsampling=False,
+            n_workers=None,
+        )
 
     logger.success("Pipeline completed.")
 
