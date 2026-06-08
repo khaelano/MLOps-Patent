@@ -436,7 +436,11 @@ def pipeline_cmd(
 
         if force or not processed_path.exists():
             logger.info(f"--- Embed: {cleaned_path} ---")
-            embed_data(file_path=cleaned_path, output_path=processed_path)
+            embed_data(
+                file_path=cleaned_path,
+                output_path=processed_path,
+                embedder_spec="embed-anything-onnx:AllMiniLML6V2Q",
+            )
 
     model_path = MODELS_DIR / "model.lshif"
     if force or not model_path.exists():
