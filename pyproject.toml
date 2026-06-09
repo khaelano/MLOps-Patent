@@ -24,6 +24,8 @@ dependencies = [
     "loguru",
     "mlflow>=3.11.1",
     "numpy",
+    "prometheus-client>=0.21.0",
+    "prometheus-fastapi-instrumentator>=7.0.0",
     "pandas",
     "psycopg2-binary>=2.9.12",
     "pyarrow>=23.0.1",
