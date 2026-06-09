@@ -2,7 +2,6 @@ name: Continuous Training
 
 on:
   schedule:
-    # Every Monday at 03:00 UTC
     - cron: "0 3 * * 1"
   workflow_dispatch:
     inputs:
@@ -14,6 +13,8 @@ on:
         options:
           - weekly
           - drift
+  repository_dispatch:
+    types: [drift-detected]
 
 permissions:
   contents: write # needed to push DVC lock + .dvc metadata back
@@ -99,7 +100,8 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
           AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
         run: |
-          TRIGGER="${{ github.event.inputs.trigger || 'weekly' }}"
+          # repository_dispatch defaults to drift, workflow_dispatch uses input
+          TRIGGER="${{ github.event.inputs.trigger || 'drift' }}"
 
           output=$(uv run python patent/cli.py continuous \
             --trigger "$TRIGGER" \
