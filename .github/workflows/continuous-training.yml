@@ -1,0 +1,190 @@
+name: Continuous Training
+
+on:
+  schedule:
+    # Every Monday at 03:00 UTC
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      trigger:
+        description: "Trigger mode"
+        required: true
+        type: choice
+        default: "weekly"
+        options:
+          - weekly
+          - drift
+
+permissions:
+  contents: write # needed to push DVC lock + .dvc metadata back
+  packages: write
+
+concurrency:
+  group: continuous-training
+  cancel-in-progress: false # never cancel a training run
+
+jobs:
+  # ── Weekly / drift: fetch data, process, train, evaluate, promote ─────────
+  continuous-training:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    environment: Patent Model & Dataset Storage
+
+    env:
+      UV_SYSTEM_PYTHON: "1"
+      PYTHONUNBUFFERED: "1"
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # Fetch full history so DVC can compute diffs correctly
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.10"
+          enable-cache: true
+
+      - name: Install Python dependencies
+        run: |
+          uv sync
+
+      - name: Pull dataset from DVC remote
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DVC_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.DVC_S3_ENDPOINT }}
+          DVC_S3_ENDPOINTURL: ${{ secrets.DVC_S3_ENDPOINT }}
+        run: |
+          uv run dvc pull --verbose
+
+      - name: Start MLflow server
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+          MLFLOW_DB_URI: ${{ secrets.MLFLOW_DB_URI }}
+          MLFLOW_S3_BUCKET: ${{ secrets.MLFLOW_S3_BUCKET }}
+        run: |
+          uv run mlflow server \
+            --backend-store-uri "${MLFLOW_DB_URI}" \
+            --default-artifact-root "s3://${MLFLOW_S3_BUCKET}/artifacts/" \
+            --host 127.0.0.1 \
+            --port 5000 \
+            > .mlflow-server.log 2>&1 &
+          echo $! > .mlflow-server.pid
+
+          echo "Waiting for MLflow server..."
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:5000/api/2.0/mlflow/experiments/list > /dev/null 2>&1; then
+              echo "MLflow server is ready (attempt $i)"
+              break
+            fi
+            sleep 2
+          done
+          kill -0 "$(cat .mlflow-server.pid)" 2>/dev/null || {
+            echo "MLflow server failed to start. Log:"
+            cat .mlflow-server.log
+            exit 1
+          }
+
+      - name: Run continuous training pipeline
+        id: pipeline
+        env:
+          MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+        run: |
+          TRIGGER="${{ github.event.inputs.trigger || 'weekly' }}"
+
+          output=$(uv run python patent/cli.py continuous \
+            --trigger "$TRIGGER" \
+            --mlflow-experiment "continuous-training" \
+            --n-workers 4 \
+            2>&1 | tee /dev/stderr)
+
+          # Extract whether training produced new artifacts
+          promoted=$(echo "$output" | grep -c "promoted to Production" || true)
+
+          echo "trigger=$TRIGGER" >> "$GITHUB_OUTPUT"
+          echo "promoted=$promoted" >> "$GITHUB_OUTPUT"
+
+      - name: Stop MLflow server
+        if: always()
+        run: |
+          if [ -f .mlflow-server.pid ]; then
+            kill "$(cat .mlflow-server.pid)" 2>/dev/null || true
+          fi
+
+      # ── DVC: push cached data to remote ──────────────────────────────────
+      - name: Push data to DVC remote
+        if: success()
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DVC_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.DVC_S3_ENDPOINT }}
+          DVC_S3_ENDPOINTURL: ${{ secrets.DVC_S3_ENDPOINT }}
+        run: |
+          uv run dvc push --verbose
+
+      # ── Git: commit DVC lock + metadata back to the repo ─────────────────
+      - name: Commit DVC state changes
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage DVC artifacts that may have changed
+          git add dvc.lock
+          git add data/*.dvc data/**/*.dvc 2>/dev/null || true
+          git add models/*.dvc models/**/*.dvc 2>/dev/null || true
+          git add data/raw/last_update.txt 2>/dev/null || true
+
+          if git diff --cached --quiet; then
+            echo "No DVC state changes to commit."
+          else
+            git commit -m "[skip ci] continuous-training: update DVC state [${{ github.run_id }}]"
+            git push origin HEAD:${{ github.ref_name }}
+            echo "DVC state pushed to ${{ github.ref_name }}"
+          fi
+
+      # ── Docker: build and push image if model was promoted ───────────────
+      - name: Log in to GHCR
+        if: success() && steps.pipeline.outputs.promoted != '0'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        if: success() && steps.pipeline.outputs.promoted != '0'
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+          MLFLOW_MODEL_NAME: patent-lshiforest
+        run: |
+          uv run mlflow models build-docker \
+            --model-uri "models:/${MLFLOW_MODEL_NAME}/Production" \
+            --name "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest" \
+            --env-manager local
+
+          docker tag \
+            "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest" \
+            "ghcr.io/${{ github.repository_owner }}/mlops-patent:${{ github.run_id }}"
+
+          docker push "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest"
+          docker push "ghcr.io/${{ github.repository_owner }}/mlops-patent:${{ github.run_id }}"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Continuous Training Run" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Trigger**: ${{ steps.pipeline.outputs.trigger || 'N/A' }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Run ID**: [${{ github.run_id }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **Promoted**: ${{ steps.pipeline.outputs.promoted != '0' && 'Yes' || 'No' }}" >> "$GITHUB_STEP_SUMMARY"

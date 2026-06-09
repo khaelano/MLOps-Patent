@@ -136,6 +136,21 @@ docker-release: docker-build docker-push
 pipeline: requirements
 	uv run $(PYTHON_INTERPRETER) patent/cli.py pipeline $(if $(RAW),--raw $(RAW)) $(if $(SKIP_INIT),--skip-init) $(if $(FORCE),--force)
 
+## Run the continuous training pipeline (weekly update, incremental processing, retrain, promote)
+.PHONY: continuous
+continuous: requirements
+	uv run $(PYTHON_INTERPRETER) patent/cli.py continuous --trigger weekly $(if $(DRY_RUN),--dry-run) $(if $(MLFLOW_EXPERIMENT),--mlflow-experiment $(MLFLOW_EXPERIMENT))
+
+## Dry-run the continuous training pipeline (no side-effects)
+.PHONY: continuous-dry-run
+continuous-dry-run: requirements
+	uv run $(PYTHON_INTERPRETER) patent/cli.py continuous --trigger weekly --dry-run
+
+## Check for data drift against the stored baseline (requires running MLflow server)
+.PHONY: drift-check
+drift-check: requirements
+	uv run $(PYTHON_INTERPRETER) patent/cli.py drift-check
+
 
 #################################################################################
 # Self Documenting Commands                                                     #

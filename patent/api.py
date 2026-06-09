@@ -18,6 +18,10 @@ Endpoints
     Liveness / readiness probe.  Returns model version and embedder info.
 ``POST /predict``
     Accepts ``{"texts": ["title abstract", ...]}`` and returns anomaly scores.
+``GET /metrics``
+    Prometheus metrics (auto-instrumented HTTP + custom application metrics).
+``GET /drift``
+    Dedicated endpoint for application-level Prometheus metrics.
 """
 
 from __future__ import annotations
@@ -27,29 +31,47 @@ import os
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from loguru import logger
 import mlflow
 import numpy as np
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Histogram,
+    generate_latest,
+)
+from prometheus_fastapi_instrumentator import Instrumentator
 from pydantic import BaseModel
 
 from patent.dataset.embedders import get_embedder
 from patent.lshiforest import LSHiForest, rescale_scores
-
-# ── Configuration (env vars with defaults) ──────────────────────────────────
+from patent.monitoring.metrics import (
+    DATA_EMBEDDING_DIM,
+    METRICS_REGISTRY,
+    MODEL_INFO,
+)
 
 MLFLOW_TRACKING_URI: str = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
 MLFLOW_MODEL_NAME: str = os.getenv("MLFLOW_MODEL_NAME", "patent-lshiforest")
 EMBEDDER_SPEC: str = os.getenv("EMBEDDER_SPEC", "embed-anything-onnx:AllMiniLML6V2Q")
 
-# ── Global state — populated during lifespan startup ────────────────────────
-
 _model: LSHiForest | None = None
 _embedder: Any = None
 _model_version: str | None = None
 
+PREDICTION_COUNT = Counter(
+    "patent_predictions_total",
+    "Total number of predictions served.",
+    registry=METRICS_REGISTRY,
+)
 
-# ── Lifespan ────────────────────────────────────────────────────────────────
+PREDICTION_SCORE_HIST = Histogram(
+    "patent_prediction_scores",
+    "Distribution of raw anomaly scores from predictions.",
+    buckets=[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+    registry=METRICS_REGISTRY,
+)
 
 
 def _load_model_from_registry() -> tuple[LSHiForest, str]:
@@ -108,14 +130,18 @@ async def lifespan(app: FastAPI):
         f"Model v{_model_version} loaded ({_model.n_trees} trees, family={_model.family_name})"
     )
 
+    MODEL_INFO.labels(
+        model_version=_model_version or "unknown",
+        model_name=MLFLOW_MODEL_NAME,
+    ).set(1)
+    DATA_EMBEDDING_DIM.set(_embedder.embedding_dim)
+
     yield
 
     if _embedder is not None:
         _embedder.stop_pool()
     logger.info("Inference server shutdown complete")
 
-
-# ── Application ─────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Patent Anomaly Detection API",
@@ -124,8 +150,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-
-# ── Request / Response schemas ──────────────────────────────────────────────
+Instrumentator(
+    excluded_handlers=["/metrics", "/health"],
+    registry=METRICS_REGISTRY,
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=True)
 
 
 class PredictRequest(BaseModel):
@@ -143,9 +171,6 @@ class HealthResponse(BaseModel):
     model_name: str
     model_version: str | None
     embedder: str
-
-
-# ── Endpoints ───────────────────────────────────────────────────────────────
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -175,7 +200,6 @@ async def predict(req: PredictRequest) -> PredictResponse:
     if not req.texts:
         raise HTTPException(status_code=400, detail="No texts provided")
 
-    # ── Embed ───────────────────────────────────────────────────────────
     try:
         embeddings = _embedder.encode(req.texts, show_progress=False)
     except Exception as exc:
@@ -186,7 +210,6 @@ async def predict(req: PredictRequest) -> PredictResponse:
     if X.ndim == 1:
         X = X.reshape(1, -1)
 
-    # ── Score ───────────────────────────────────────────────────────────
     try:
         raw_scores = _model.score(X)
         rescaled = rescale_scores(raw_scores)
@@ -194,8 +217,27 @@ async def predict(req: PredictRequest) -> PredictResponse:
         logger.error(f"Scoring failed: {exc}")
         raise HTTPException(status_code=500, detail=f"Scoring failed: {exc}")
 
+    PREDICTION_COUNT.inc(len(req.texts))
+    for val in raw_scores:
+        if np.isfinite(val):
+            PREDICTION_SCORE_HIST.observe(float(val))
+
     return PredictResponse(
         scores=raw_scores.tolist(),
         rescaled_scores=rescaled.tolist(),
         model_version=_model_version or "unknown",
+    )
+
+
+@app.get("/drift")
+async def drift_metrics() -> Response:
+    """Expose custom drift and model metrics in Prometheus text format.
+
+    This endpoint contains application-level metrics (drift gauges, model
+    info, prediction counters) scoped to the dedicated ``METRICS_REGISTRY``,
+    separate from the auto-instrumented HTTP metrics.
+    """
+    return Response(
+        content=generate_latest(METRICS_REGISTRY),
+        media_type=CONTENT_TYPE_LATEST,
     )
