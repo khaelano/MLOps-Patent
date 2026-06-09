@@ -190,6 +190,9 @@ cython_debug/
 # Temp directory
 .tmp/
 
+# HuggingFace embedder model cache
+.hf_cache/
+
 # Local dvc store
 .dvcstore/
 

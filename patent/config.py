@@ -33,6 +33,17 @@ MODELS_DIR = PROJ_ROOT / "models"
 REPORTS_DIR = PROJ_ROOT / "reports"
 FIGURES_DIR = REPORTS_DIR / "figures"
 
+# ── HuggingFace model cache ───────────────────────────────────────────────
+# Embed-anything (and the underlying HF libraries) download models into
+# ``HF_HOME``.  Point this at a project-local directory so that CI can
+# cache it with ``actions/cache`` across runs.
+HF_CACHE_DIR = PROJ_ROOT / ".hf_cache"
+os.environ.setdefault("HF_HOME", str(HF_CACHE_DIR))
+
+# HuggingFace API token — set via HF_TOKEN env var (or .env file).  Required
+# for gated models; optional for public ones.
+HF_TOKEN = os.environ.get("HF_TOKEN")
+
 # ── Project-local temporary directory ─────────────────────────────────────
 # All pipeline scratch work (memmaps, intermediate arrays, etc.) lives
 # inside this directory so it never touches the system /tmp.

@@ -1,0 +1,53 @@
+name: "Start MLflow Server"
+description: "Start MLflow tracking server in background and wait for it to become healthy"
+
+inputs:
+  aws-access-key-id:
+    description: "AWS access key for MLflow S3"
+    required: true
+  aws-secret-access-key:
+    description: "AWS secret key for MLflow S3"
+    required: true
+  aws-endpoint-url:
+    description: "S3 endpoint URL"
+    required: true
+  mlflow-db-uri:
+    description: "MLflow backend store URI"
+    required: true
+  mlflow-s3-bucket:
+    description: "S3 bucket name for MLflow artifacts"
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Start MLflow server
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_ENDPOINT_URL_S3: ${{ inputs.aws-endpoint-url }}
+        MLFLOW_DB_URI: ${{ inputs.mlflow-db-uri }}
+        MLFLOW_S3_BUCKET: ${{ inputs.mlflow-s3-bucket }}
+      run: |
+        uv run mlflow server \
+          --backend-store-uri "${MLFLOW_DB_URI}" \
+          --default-artifact-root "s3://${MLFLOW_S3_BUCKET}/artifacts/" \
+          --host 127.0.0.1 \
+          --port 5000 \
+          > .mlflow-server.log 2>&1 &
+        echo $! > .mlflow-server.pid
+
+        echo "Waiting for MLflow server..."
+        for i in $(seq 1 30); do
+          if curl -sf http://127.0.0.1:5000/api/2.0/mlflow/experiments/list > /dev/null 2>&1; then
+            echo "MLflow server is ready (attempt $i)"
+            break
+          fi
+          sleep 2
+        done
+        kill -0 "$(cat .mlflow-server.pid)" 2>/dev/null || {
+          echo "MLflow server failed to start. Log:"
+          cat .mlflow-server.log
+          exit 1
+        }
