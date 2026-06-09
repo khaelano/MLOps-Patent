@@ -11,6 +11,10 @@ inputs:
   aws-endpoint-url:
     description: "S3 endpoint URL"
     required: true
+  targets:
+    description: "Space-separated DVC targets to pull (omit to pull everything)"
+    required: false
+    default: ""
 
 runs:
   using: "composite"
@@ -22,4 +26,9 @@ runs:
         AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
         AWS_ENDPOINT_URL_S3: ${{ inputs.aws-endpoint-url }}
         DVC_S3_ENDPOINTURL: ${{ inputs.aws-endpoint-url }}
-      run: uv run dvc pull --verbose
+      run: |
+        if [ -n "${{ inputs.targets }}" ]; then
+          uv run dvc pull --verbose ${{ inputs.targets }}
+        else
+          uv run dvc pull --verbose
+        fi
