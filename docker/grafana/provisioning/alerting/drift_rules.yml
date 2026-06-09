@@ -1,0 +1,85 @@
+# Grafana alert rule: Data Drift Detected
+#
+# Triggers when KS test p-value drops below 0.05 for 5 minutes,
+# indicating a statistically significant shift in the anomaly score
+# distribution compared to the Production baseline.
+#
+# This alert is wired to a GitHub repository_dispatch contact point
+# that triggers the continuous-training workflow.
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: patent_drift_alerts
+    folder: ""
+    interval: 1m
+    rules:
+      - uid: patent_drift_ks_pvalue
+        title: "Data Drift Detected — KS p-value dropped"
+        condition: C
+        data:
+          - refId: A
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: |
+                patent_drift_score_ks_pvalue{service="patent-inference"}
+              intervalMs: 60000
+              maxDataPoints: 43200
+              refId: A
+          - refId: B
+            relativeTimeRange:
+              from: 600
+              to: 0
+            datasourceUid: "${DS_PROMETHEUS}"
+            model:
+              expr: |
+                abs(patent_drift_score_mean_shift{service="patent-inference"})
+              intervalMs: 60000
+              maxDataPoints: 43200
+              refId: B
+          - refId: C
+            datasourceUid: "__expr__"
+            model:
+              type: "classic_conditions"
+              refId: C
+              conditions:
+                - evaluator:
+                    params: [0.05]
+                    type: "lt"
+                  operator:
+                    type: "and"
+                  query:
+                    params: ["A"]
+                  reducer:
+                    params: []
+                    type: "last"
+                  type: "query"
+                - evaluator:
+                    params: [0.03]
+                    type: "gt"
+                  operator:
+                    type: "and"
+                  query:
+                    params: ["B"]
+                  reducer:
+                    params: []
+                    type: "last"
+                  type: "query"
+        noDataState: NoData
+        execErrState: Error
+        for: 5m
+        annotations:
+          summary: "Data drift detected — KS p-value {{ $values.A.Value }}"
+          description: |
+            Score distribution has shifted significantly from the Production baseline.
+            KS p-value: {{ $values.A.Value }}
+            Mean shift: {{ $values.B.Value }}
+            This will trigger the continuous-training workflow.
+        labels:
+          severity: warning
+          drift_type: score_distribution
+        isPaused: false

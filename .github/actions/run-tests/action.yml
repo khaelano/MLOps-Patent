@@ -1,0 +1,16 @@
+name: "Run Tests"
+description: "Run pytest unit tests (excludes integration tests needing external services)"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Run tests
+      shell: bash
+      env:
+        TERM: dumb
+        COLUMNS: "120"
+      run: |
+        uv run pytest tests/ \
+          --ignore=tests/test_data_ingestion.py \
+          --ignore=tests/test_registry.py \
+          -q

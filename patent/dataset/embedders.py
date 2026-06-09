@@ -12,12 +12,22 @@ Usage::
 
     vectors = embedder.encode(["hello world", "foo bar"])
     print(embedder.embedding_dim)  # 384
+
+Environment variables
+---------------------
+``HF_HOME``
+    HuggingFace cache directory (set by ``patent.config`` to
+    ``<project>/.hf_cache`` — overridable in CI).
+``HF_TOKEN``
+    HuggingFace API token for gated / private models (set via
+    ``.env`` or CI secrets).
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+import os
 from typing import Any
 
 from loguru import logger
@@ -153,11 +163,15 @@ class EmbedAnythingEmbedder(Embedder):
     def __post_init__(self) -> None:
         from embed_anything import Dtype, EmbeddingModel, TextEmbedConfig
 
+        from patent.config import HF_TOKEN
+
         quant_dtype: Any = None
         if self.dtype:
             quant_dtype = getattr(Dtype, self.dtype)
         self._model = EmbeddingModel.from_pretrained_hf(
-            model_id=self.model_name, dtype=quant_dtype
+            model_id=self.model_name,
+            dtype=quant_dtype,
+            token=HF_TOKEN,
         )
         self._config = TextEmbedConfig(chunk_size=256, batch_size=self.batch_size)
 
@@ -218,6 +232,13 @@ class EmbedAnythingONNXEmbedder(Embedder):
             TextEmbedConfig,
             WhichModel,
         )
+
+        from patent.config import HF_TOKEN
+
+        # The ONNX path does not expose a ``token`` kwarg — the underlying
+        # HuggingFace download reads HF_TOKEN from the environment.
+        if HF_TOKEN:
+            os.environ.setdefault("HF_TOKEN", HF_TOKEN)
 
         onnx_model = getattr(ONNXModel, self.model_name)
         quant_dtype = getattr(Dtype, self.dtype)

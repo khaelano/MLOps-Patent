@@ -1,0 +1,21 @@
+name: "Setup Python"
+description: "Install uv and sync Python dependencies (checkout must be done first)"
+
+inputs:
+  python-version:
+    description: "Python version to install"
+    required: false
+    default: "3.10"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+        enable-cache: true
+
+    - name: Install Python dependencies
+      shell: bash
+      run: uv sync

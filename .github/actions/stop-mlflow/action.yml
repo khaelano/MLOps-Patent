@@ -1,0 +1,13 @@
+name: "Stop MLflow Server"
+description: "Stop the background MLflow tracking server"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Stop MLflow server
+      shell: bash
+      if: always()
+      run: |
+        if [ -f .mlflow-server.pid ]; then
+          kill "$(cat .mlflow-server.pid)" 2>/dev/null || true
+        fi

@@ -1,0 +1,114 @@
+name: "Train, Evaluate & Register (Reusable)"
+
+on:
+  workflow_call:
+    inputs:
+      pr-number:
+        description: "Pull request number (used for MLflow experiment naming)"
+        required: false
+        type: string
+        default: ""
+      experiment-name:
+        description: "MLflow experiment name override"
+        required: false
+        type: string
+        default: ""
+    outputs:
+      run_id:
+        description: "MLflow run ID from training"
+        value: ${{ jobs.train-evaluate-register.outputs.run_id }}
+  workflow_dispatch:
+    inputs:
+      experiment-name:
+        description: "MLflow experiment name"
+        required: false
+        type: string
+
+jobs:
+  train-evaluate-register:
+    runs-on: ubuntu-latest
+    environment: Patent Model & Dataset Storage
+    timeout-minutes: 120
+    outputs:
+      run_id: ${{ steps.train.outputs.run_id }}
+
+    env:
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-python
+
+      - uses: ./.github/actions/dvc-pull
+        with:
+          aws-access-key-id: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.DVC_S3_SECRET_KEY }}
+          aws-endpoint-url: ${{ secrets.DVC_S3_ENDPOINT }}
+          targets: data/processed/ models/
+
+      - uses: ./.github/actions/start-mlflow
+        with:
+          aws-access-key-id: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          aws-endpoint-url: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+          mlflow-db-uri: ${{ secrets.MLFLOW_DB_URI }}
+          mlflow-s3-bucket: ${{ secrets.MLFLOW_S3_BUCKET }}
+
+      - name: Train and evaluate model
+        id: train
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+        run: |
+          EXPERIMENT="ci"
+          if [ -n "${{ inputs.experiment-name }}" ]; then
+            EXPERIMENT="${{ inputs.experiment-name }}"
+          elif [ -n "${{ inputs.pr-number }}" ]; then
+            EXPERIMENT="ci-pr-${{ inputs.pr-number }}"
+          fi
+
+          output=$(uv run python patent/cli.py model train \
+            --mlflow-experiment "${EXPERIMENT}" \
+            2>&1 | tee /dev/stderr)
+
+          # Strip ANSI escape codes, then extract the 32-char hex run_id
+          clean=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
+          run_id=$(echo "$clean" | grep -oP 'MLflow run ID: \K[a-f0-9]{32}')
+          pyfunc_version=$(echo "$clean" | grep -oP 'Pyfunc version: \K\d+')
+
+          if [ -z "$run_id" ]; then
+            echo "ERROR: Could not extract MLflow run ID from output"
+            exit 1
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "pyfunc_version=${pyfunc_version:-}" >> "$GITHUB_OUTPUT"
+          echo "MLflow run completed: $run_id (pyfunc v${pyfunc_version:-?})"
+
+      - name: Register model (promote if better)
+        id: register
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+        run: |
+          pyfunc_ver="${{ steps.train.outputs.pyfunc_version }}"
+          pyfunc_arg=""
+          if [ -n "$pyfunc_ver" ]; then
+            pyfunc_arg="--pyfunc-version $pyfunc_ver"
+          fi
+          uv run python patent/cli.py model register \
+            "${{ steps.train.outputs.run_id }}" \
+            $pyfunc_arg \
+            2>&1 | tee .register-output.log
+
+      - uses: ./.github/actions/stop-mlflow
+
+      - name: Upload registration log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: register-output-${{ github.run_id }}
+          path: .register-output.log
+          retention-days: 7

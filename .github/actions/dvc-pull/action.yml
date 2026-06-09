@@ -1,0 +1,34 @@
+name: "DVC Pull"
+description: "Pull dataset from DVC remote (S3)"
+
+inputs:
+  aws-access-key-id:
+    description: "AWS access key for DVC S3 remote"
+    required: true
+  aws-secret-access-key:
+    description: "AWS secret key for DVC S3 remote"
+    required: true
+  aws-endpoint-url:
+    description: "S3 endpoint URL"
+    required: true
+  targets:
+    description: "Space-separated DVC targets to pull (omit to pull everything)"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Pull dataset from DVC remote
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_ENDPOINT_URL_S3: ${{ inputs.aws-endpoint-url }}
+        DVC_S3_ENDPOINTURL: ${{ inputs.aws-endpoint-url }}
+      run: |
+        if [ -n "${{ inputs.targets }}" ]; then
+          uv run dvc pull --verbose ${{ inputs.targets }}
+        else
+          uv run dvc pull --verbose
+        fi

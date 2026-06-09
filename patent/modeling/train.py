@@ -82,9 +82,15 @@ def _log_pyfunc_model(model_path: str, model_params: dict[str, Any]) -> int | No
             registered_model_name="patent-lshiforest",
             pip_requirements=[
                 "embed-anything>=0.7.0",
+                "fastapi>=0.115.0",
+                "loguru>=0.7",
                 "numpy>=1.24",
                 "pandas>=2.0",
-                "loguru>=0.7",
+                "prometheus_client>=0.21.0",
+                "pydantic>=2.0",
+                "python-dotenv>=1.0",
+                "scipy>=1.10.0",
+                "uvicorn[standard]>=0.34.0",
             ],
         )
         version: Any = getattr(model_info, "registered_model_version", None)

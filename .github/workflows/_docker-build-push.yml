@@ -1,0 +1,55 @@
+name: "Docker Build & Push (Reusable)"
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  docker-build-push:
+    runs-on: ubuntu-latest
+    environment: Patent Model & Dataset Storage
+    timeout-minutes: 60
+
+    env:
+      MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-python
+
+      - uses: ./.github/actions/start-mlflow
+        with:
+          aws-access-key-id: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          aws-endpoint-url: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+          mlflow-db-uri: ${{ secrets.MLFLOW_DB_URI }}
+          mlflow-s3-bucket: ${{ secrets.MLFLOW_S3_BUCKET }}
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+          MLFLOW_MODEL_NAME: patent-lshiforest
+        run: |
+          uv run mlflow models build-docker \
+            --model-uri "models:/${MLFLOW_MODEL_NAME}/Production" \
+            --name "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest" \
+            --env-manager local
+
+          docker tag \
+            "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest" \
+            "ghcr.io/${{ github.repository_owner }}/mlops-patent:${{ github.sha }}"
+
+          docker push "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest"
+          docker push "ghcr.io/${{ github.repository_owner }}/mlops-patent:${{ github.sha }}"
+
+      - uses: ./.github/actions/stop-mlflow
