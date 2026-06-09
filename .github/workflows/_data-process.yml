@@ -19,6 +19,7 @@ on:
 jobs:
   data-process:
     runs-on: ubuntu-latest
+    environment: Patent Model & Dataset Storage
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4

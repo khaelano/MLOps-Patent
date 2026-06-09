@@ -27,6 +27,7 @@ on:
 jobs:
   train-evaluate-register:
     runs-on: ubuntu-latest
+    environment: Patent Model & Dataset Storage
     timeout-minutes: 120
     outputs:
       run_id: ${{ steps.train.outputs.run_id }}
