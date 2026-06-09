@@ -24,6 +24,9 @@ on:
         required: false
         type: string
 
+permissions:
+  contents: write
+
 jobs:
   data-update:
     runs-on: ubuntu-latest
@@ -53,7 +56,7 @@ jobs:
           fi
           uv run python patent/cli.py data update ${FROM_ARG} ${TO_ARG}
 
-      - name: Push updated data to DVC remote
+      - name: DVC Add, Git Commit, and Push
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.DVC_S3_ACCESS_KEY }}
@@ -61,5 +64,24 @@ jobs:
           AWS_ENDPOINT_URL_S3: ${{ secrets.DVC_S3_ENDPOINT }}
           DVC_S3_ENDPOINTURL: ${{ secrets.DVC_S3_ENDPOINT }}
         run: |
+          # 1. Track new/changed data with DVC (generates/updates .dvc files)
           uv run dvc add data/raw/
+
+          # 2. Configure Git identity
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 3. Stage all changes
+          git add .
+
+          # 4. Commit and push only if there are actual changes
+          if ! git diff-index --quiet HEAD --; then
+            # [skip ci] prevents this commit from triggering the workflow again
+            git commit -m "chore: update dataset via OAI-PMH [skip ci]"
+            git push origin ${{ github.ref_name }}
+          else
+            echo "No changes to commit."
+          fi
+
+          # 5. Push the actual data blobs to the DVC remote
           uv run dvc push --verbose

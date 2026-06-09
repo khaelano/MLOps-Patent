@@ -31,33 +31,17 @@ data_app = typer.Typer(help="Data ingestion and preprocessing commands", no_args
 app.add_typer(data_app, name="data")
 
 
-@data_app.command("init")
-def init_data(
-    output_path: Path = typer.Option(
-        RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json.zst",
-        "--output-path",
-        "-o",
-        help="File path for metadata storage",
-    ),
-):
-    """Bootstrap the dataset by downloading the Kaggle snapshot and partitioning it."""
+# --- Core Logic Helpers ---
 
+
+def _init_data(output_path: Path):
+    """Bootstrap the dataset by downloading the Kaggle snapshot and partitioning it."""
     snapshot_file = download_kaggle_snapshot(output_path)
     last_update_date = extract_latest_update(snapshot_file)
     set_last_update_date(last_update_date)
 
 
-@data_app.command("update")
-def update_data(
-    output_path: Path = typer.Option(
-        RAW_DATA_DIR / "updates", "--output-path", "-o", help="Updates directory"
-    ),
-    from_date: str = typer.Option(
-        None,
-        help="Start date (YYYY-MM-DD). Defaults to the day after the last update date in metadata.",
-    ),
-    to_date: str = typer.Option(None, help="End date (YYYY-MM-DD). Defaults to today."),
-):
+def _update_data(output_path: Path, from_date: str | None = None, to_date: str | None = None):
     """Fetch incremental updates from arXiv using the OAI-PMH interface."""
     from datetime import datetime, timedelta
 
@@ -81,23 +65,13 @@ def update_data(
     set_last_update_date(to_date)
 
 
-@data_app.command("reserialize")
-def reserialize_data(
-    file_path: Path = typer.Argument(..., help="Path to the raw XML/JSON file or directory"),
-    output_path: Path = typer.Option(
-        None,
-        help="Path to save the parsed parquet file. Defaults to data/interim/serialized/[filename].parquet",
-    ),
-    is_json: bool = typer.Option(False, "--json", help="Parse as JSON instead of XML"),
-):
-    """Parse a raw XML (or JSON) file/directory to a DataFrame and serialize it as Parquet in the interim folder."""
-
+def _reserialize_data(file_path: Path, output_path: Path | None = None, is_json: bool = False):
+    """Parse a raw XML (or JSON) file/directory to a DataFrame and serialize it as Parquet."""
     if not file_path.exists():
         logger.error(f"Path not found: {file_path}")
         raise typer.Exit(1)
 
     if not output_path:
-        # Strip .zst before replacing the data suffix for clean output naming
         stem_name = file_path.name
         if stem_name.endswith(".zst"):
             stem_name = stem_name[:-4]
@@ -119,16 +93,8 @@ def reserialize_data(
     logger.info(f"Successfully serialized parsed data to {output_path}")
 
 
-@data_app.command("clean")
-def clean_data(
-    file_path: Path = typer.Argument(..., help="Path to the input corpus Parquet"),
-    output_path: Path = typer.Option(
-        None,
-        help="Path to dump cleaned artifact. Defaults to data/interim/cleaned/[filename].parquet",
-    ),
-):
+def _clean_data(file_path: Path, output_path: Path | None = None):
     """Read input artifact (parquet), apply text cleaning, drop missing, and serialize cleaned payload."""
-
     if not file_path.exists():
         logger.error(f"File not found: {file_path}")
         raise typer.Exit(1)
@@ -144,25 +110,13 @@ def clean_data(
     logger.info(f"Successfully serialized cleaned data to {output_path}")
 
 
-@data_app.command("embed")
-def embed_data(
-    file_path: Path = typer.Argument(..., help="Path to the cleaned corpus Parquet"),
-    output_path: Path = typer.Option(
-        None,
-        help="Path to dump embedded artifact. Defaults to data/processed/[filename].parquet",
-    ),
-    embedder_spec: str = typer.Option(
-        "embed-anything-onnx:AllMiniLML6V2Q",
-        "--embedder",
-        help="Embedder spec: '<protocol>:<model>' (e.g. 'embed-anything-onnx:AllMiniLML6V2Q')",
-    ),
-    batch_size: int = typer.Option(CHUNK_SIZE, help="Row count per chunk to process sequentially"),
+def _embed_data(
+    file_path: Path,
+    output_path: Path | None = None,
+    embedder_spec: str = "embed-anything-onnx:AllMiniLML6V2Q",
+    batch_size: int = CHUNK_SIZE,
 ):
-    """Read a cleaned Parquet artifact sequentially in chunks using PyArrow to
-    minimize memory footprint.  Generates text embeddings for titles using
-    a pluggable embedder (default: embed-anything-onnx), and streams the
-    resulting features iteratively into a new Parquet file.
-    """
+    """Generate text embeddings for titles and stream features into a new Parquet file."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -192,14 +146,11 @@ def embed_data(
         for i, batch in enumerate(parquet_file.iter_batches(batch_size=batch_size)):
             logger.info(f"Processing chunk {i + 1}...")
             df_chunk = batch.to_pandas()
-
             df_embedded = embed(df_chunk, embedder)
-
             table = pa.Table.from_pandas(df_embedded)
 
             if writer is None:
                 writer = pq.ParquetWriter(output_path, table.schema)
-
             writer.write_table(table)
     finally:
         embedder.stop_pool()
@@ -208,6 +159,172 @@ def embed_data(
         writer.close()
 
     logger.info(f"Successfully serialized chunked feature embeddings to {output_path}")
+
+
+def _train_model(
+    data: Path = PROCESSED_DATA_DIR,
+    output: Path = MODELS_DIR,
+    num_trees: int = 200,
+    max_depth: int = 21,
+    seed: int = 42,
+    lsh_family: str = "l2",
+    eta: float = 0.0,
+    params: Path | None = None,
+    mlflow_experiment: str | None = None,
+    top_k: int = 100,
+    do_subsampling: bool = False,
+    n_workers: int | None = None,
+):
+    """Train an LSHiForest model on processed embeddings, then evaluate inline."""
+    import json
+
+    from patent.modeling.train import train_model
+
+    model_cfg = {
+        "n_trees": num_trees,
+        "max_depth": max_depth,
+        "seed": seed,
+        "family": lsh_family,
+        "eta": eta,
+    }
+
+    # Now params is safely a Path object or None, avoiding the OptionInfo attribute error
+    if params and params.exists():
+        with open(params, "r") as f:
+            model_cfg.update(json.load(f))
+
+    ctx = {"experiment_name": mlflow_experiment} if mlflow_experiment else None
+    output.mkdir(parents=True, exist_ok=True)
+
+    result = train_model(
+        embeddings_dir=data,
+        output_dir=output,
+        model_params=model_cfg,
+        mlflow_context=ctx,
+        top_k=top_k,
+        do_subsampling=do_subsampling,
+        n_workers=n_workers,
+    )
+
+    if result["run_id"]:
+        logger.success(f"MLflow run ID: {result['run_id']}")
+        if result.get("pyfunc_version"):
+            logger.success(f"Pyfunc version: {result['pyfunc_version']}")
+        logger.info(f"To register this model: patent model register --run-id {result['run_id']}")
+
+
+def _evaluate_model(
+    model: Path = MODELS_DIR / "model.lshif",
+    data: Path = PROCESSED_DATA_DIR,
+    output: Path = MODELS_DIR / "evaluation.json",
+    top_k: int = 100,
+    do_subsampling: bool = False,
+    subsample_splits: int = 5,
+    n_workers: int | None = None,
+    mlflow_experiment: str | None = None,
+):
+    """Evaluate model stability, score distribution, centroid correlation, and export top anomalies."""
+    from patent.modeling.train import evaluate_model
+
+    ctx = {"experiment_name": mlflow_experiment} if mlflow_experiment else None
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    evaluate_model(
+        model_path=model,
+        embeddings_dir=data,
+        output_path=output,
+        mlflow_context=ctx,
+        top_k=top_k,
+        do_subsampling=do_subsampling,
+        subsample_splits=subsample_splits,
+        n_workers=n_workers,
+    )
+
+
+def _register_model(
+    run_id: str,
+    model_name: str = "patent-lshiforest",
+    metric_key: str = "stability/jaccard_aggregated",
+    pyfunc_version: int | None = None,
+):
+    """Register a trained model to the MLflow Model Registry."""
+    from patent.modeling.registry import register_from_run
+
+    register_from_run(
+        run_id=run_id,
+        model_name=model_name,
+        metric_key=metric_key,
+        pyfunc_version=pyfunc_version,
+    )
+
+
+# --- Typer CLI Wrappers ---
+
+
+@data_app.command("init")
+def init_data(
+    output_path: Path = typer.Option(
+        RAW_DATA_DIR / "arxiv-metadata-oai-snapshot.json.zst",
+        "--output-path",
+        "-o",
+        help="File path for metadata storage",
+    ),
+):
+    _init_data(output_path)
+
+
+@data_app.command("update")
+def update_data(
+    output_path: Path = typer.Option(
+        RAW_DATA_DIR / "updates", "--output-path", "-o", help="Updates directory"
+    ),
+    from_date: str = typer.Option(
+        None,
+        help="Start date (YYYY-MM-DD). Defaults to the day after the last update date in metadata.",
+    ),
+    to_date: str = typer.Option(None, help="End date (YYYY-MM-DD). Defaults to today."),
+):
+    _update_data(output_path, from_date, to_date)
+
+
+@data_app.command("reserialize")
+def reserialize_data(
+    file_path: Path = typer.Argument(..., help="Path to the raw XML/JSON file or directory"),
+    output_path: Path = typer.Option(
+        None,
+        help="Path to save the parsed parquet file. Defaults to data/interim/serialized/[filename].parquet",
+    ),
+    is_json: bool = typer.Option(False, "--json", help="Parse as JSON instead of XML"),
+):
+    _reserialize_data(file_path, output_path, is_json)
+
+
+@data_app.command("clean")
+def clean_data(
+    file_path: Path = typer.Argument(..., help="Path to the input corpus Parquet"),
+    output_path: Path = typer.Option(
+        None,
+        help="Path to dump cleaned artifact. Defaults to data/interim/cleaned/[filename].parquet",
+    ),
+):
+    _clean_data(file_path, output_path)
+
+
+@data_app.command("embed")
+def embed_data(
+    file_path: Path = typer.Argument(..., help="Path to the cleaned corpus Parquet"),
+    output_path: Path = typer.Option(
+        None,
+        help="Path to dump embedded artifact. Defaults to data/processed/[filename].parquet",
+    ),
+    embedder_spec: str = typer.Option(
+        "embed-anything-onnx:AllMiniLML6V2Q",
+        "--embedder",
+        help="Embedder spec: '<protocol>:<model>' (e.g. 'embed-anything-onnx:AllMiniLML6V2Q')",
+    ),
+    batch_size: int = typer.Option(CHUNK_SIZE, help="Row count per chunk to process sequentially"),
+):
+    _embed_data(file_path, output_path, embedder_spec, batch_size)
 
 
 model_app = typer.Typer(help="Model training and evaluation commands", no_args_is_help=True)
@@ -248,46 +365,20 @@ def train_cmd(
         help="Number of parallel workers for evaluation (default: auto)",
     ),
 ):
-    """Train an LSHiForest model on processed embeddings, then evaluate inline.
-
-    When --mlflow-experiment is provided, model params, training metrics,
-    evaluation metrics, and anomaly exports are all logged to a single
-    MLflow run.
-    """
-    import json
-
-    from patent.modeling.train import train_model
-
-    model_cfg = {
-        "n_trees": num_trees,
-        "max_depth": max_depth,
-        "seed": seed,
-        "family": lsh_family,
-        "eta": eta,
-    }
-    if params and params.exists():
-        with open(params, "r") as f:
-            model_cfg.update(json.load(f))
-
-    ctx = {"experiment_name": mlflow_experiment} if mlflow_experiment else None
-
-    output.mkdir(parents=True, exist_ok=True)
-
-    result = train_model(
-        embeddings_dir=data,
-        output_dir=output,
-        model_params=model_cfg,
-        mlflow_context=ctx,
+    _train_model(
+        data=data,
+        output=output,
+        num_trees=num_trees,
+        max_depth=max_depth,
+        seed=seed,
+        lsh_family=lsh_family,
+        eta=eta,
+        params=params,
+        mlflow_experiment=mlflow_experiment,
         top_k=top_k,
         do_subsampling=do_subsampling,
         n_workers=n_workers,
     )
-
-    if result["run_id"]:
-        logger.success(f"MLflow run ID: {result['run_id']}")
-        if result.get("pyfunc_version"):
-            logger.success(f"Pyfunc version: {result['pyfunc_version']}")
-        logger.info(f"To register this model: patent model register --run-id {result['run_id']}")
 
 
 @model_app.command("evaluate")
@@ -321,22 +412,15 @@ def evaluate_cmd(
         None, "--mlflow-experiment", help="MLflow experiment name"
     ),
 ):
-    """Evaluate model stability, score distribution, centroid correlation, and export top anomalies."""
-    from patent.modeling.train import evaluate_model
-
-    ctx = {"experiment_name": mlflow_experiment} if mlflow_experiment else None
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-
-    evaluate_model(
-        model_path=model,
-        embeddings_dir=data,
-        output_path=output,
-        mlflow_context=ctx,
+    _evaluate_model(
+        model=model,
+        data=data,
+        output=output,
         top_k=top_k,
         do_subsampling=do_subsampling,
         subsample_splits=subsample_splits,
         n_workers=n_workers,
+        mlflow_experiment=mlflow_experiment,
     )
 
 
@@ -362,20 +446,7 @@ def register_cmd(
         help="Pyfunc model version auto-registered during training",
     ),
 ):
-    """Register a trained model to the MLflow Model Registry.
-
-    Compares the new model's evaluation metrics against the latest
-    Production version.  The model is auto-registered during training;
-    this step only compares metrics and handles promotion.
-    """
-    from patent.modeling.registry import register_from_run
-
-    register_from_run(
-        run_id=run_id,
-        model_name=model_name,
-        metric_key=metric_key,
-        pyfunc_version=pyfunc_version,
-    )
+    _register_model(run_id, model_name, metric_key, pyfunc_version)
 
 
 @app.command("pipeline")
@@ -413,7 +484,6 @@ def pipeline_cmd(
     cleaned_dir = INTERIM_DATA_DIR / "cleaned"
 
     for raw_path, is_json in sources:
-        # Strip .zst (and underlying .json/.xml) to derive a clean stem for output naming
         stem_name = raw_path.name
         if stem_name.endswith(".zst"):
             stem_name = stem_name[:-4]
@@ -428,20 +498,21 @@ def pipeline_cmd(
 
         if force or not serialized_path.exists():
             logger.info(f"--- Reserialize: {raw_path} ---")
-            reserialize_data(file_path=raw_path, output_path=serialized_path, is_json=is_json)
+            _reserialize_data(file_path=raw_path, output_path=serialized_path, is_json=is_json)
 
         if force or not cleaned_path.exists():
             logger.info(f"--- Clean: {serialized_path} ---")
-            clean_data(file_path=serialized_path, output_path=cleaned_path)
+            _clean_data(file_path=serialized_path, output_path=cleaned_path)
 
         if force or not processed_path.exists():
             logger.info(f"--- Embed: {cleaned_path} ---")
-            embed_data(file_path=cleaned_path, output_path=processed_path)
+            _embed_data(file_path=cleaned_path, output_path=processed_path)
 
     model_path = MODELS_DIR / "model.lshif"
     if force or not model_path.exists():
         logger.info("--- Train + Evaluate ---")
-        train_cmd(data=PROCESSED_DATA_DIR, output=MODELS_DIR)
+        # Call the core logic helper directly instead of the Typer command
+        _train_model(data=PROCESSED_DATA_DIR, output=MODELS_DIR)
 
     logger.success("Pipeline completed.")
 
