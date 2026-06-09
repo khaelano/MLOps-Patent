@@ -202,3 +202,5 @@ cython_debug/
 
 # dev mlflow directory
 .mlflow/
+mlruns/
+mlflow.db

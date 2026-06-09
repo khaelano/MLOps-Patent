@@ -33,46 +33,47 @@ services:
       - patent-net
     restart: unless-stopped
 
+  # ── Inference server — MLflow pyfunc image, FastAPI entrypoint ──────────
+  # The pyfunc image built via `mlflow models build-docker` already contains
+  # the patent package, all dependencies, and the model files.  We override
+  # the entrypoint to run *our* FastAPI app instead of MLflow's scoring_server
+  # so that /health, /predict, AND /metrics are all available from one service.
   inference-server:
     image: ghcr.io/khaelano/mlops-patent:latest
-    # ── Inline entrypoint: monkey-patch MLflow's scoring server to bind 0.0.0.0 ──
-    # MLflow 3.11.1 container _serve() does not pass --host to uvicorn, so
-    # uvicorn defaults to 127.0.0.1 and the container is unreachable from
-    # outside.  This wrapper patches scoring_server.get_cmd to inject the host.
     entrypoint:
       - python
-      - -c
-      - |
-        from mlflow.models import container as C
-        from mlflow.pyfunc import scoring_server
-
-        _orig_get_cmd = scoring_server.get_cmd
-
-        def _patched_get_cmd(*args, **kwargs):
-            kwargs.setdefault("host", "0.0.0.0")
-            return _orig_get_cmd(*args, **kwargs)
-
-        scoring_server.get_cmd = _patched_get_cmd
-        C._serve("local")
+      - -m
+      - uvicorn
+      - patent.api:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
     deploy:
       replicas: 3
     environment:
-      - DISABLE_NGINX=true
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - MLFLOW_MODEL_NAME=${MLFLOW_MODEL_NAME:-patent-lshiforest}
+      - EMBEDDER_SPEC=${EMBEDDER_SPEC:-embed-anything-onnx:AllMiniLML6V2Q}
+      - DRIFT_SCORE_BUFFER_SIZE=10000
       - HF_HOME=/app/.cache/huggingface
     volumes:
       - embedder-cache:/app/.cache
+    depends_on:
+      mlflow-server:
+        condition: service_healthy
     healthcheck:
       test:
         [
           "CMD",
           "python",
           "-c",
-          "import urllib.request; urllib.request.urlopen('http://localhost:8000/ping')",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')",
         ]
-      interval: 10s
-      timeout: 5s
+      interval: 15s
+      timeout: 10s
       retries: 5
-      start_period: 300s
+      start_period: 120s
     restart: unless-stopped
     networks:
       - patent-net
@@ -88,8 +89,58 @@ services:
     networks:
       - patent-net
 
+  # ── Prometheus — scrapes /metrics from inference-lb ────────────────────
+  prometheus:
+    image: prom/prometheus:v3.7.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - prometheus-data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - patent-net
+    restart: unless-stopped
+
+  # ── Grafana — dashboards and alerting for drift monitoring ──────────────
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
+      - GF_ALERTING_ENABLED=true
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro,Z
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro,Z
+      - grafana-data:/var/lib/grafana
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "http://localhost:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    networks:
+      - patent-net
+    restart: unless-stopped
+
 volumes:
   embedder-cache:
+  prometheus-data:
+  grafana-data:
 
 networks:
   patent-net:

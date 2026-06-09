@@ -1,0 +1,30 @@
+# Grafana contact point: GitHub Repository Dispatch
+#
+# Sends a repository_dispatch event to the GitHub Actions API when any
+# drift alert fires.  This triggers the continuous-training workflow.
+#
+# SECURITY NOTE: Set GITHUB_TOKEN and GITHUB_REPO via environment variables
+# in docker-compose.yml or .env.  The token needs `repo` or `workflow` scope.
+#
+# To use a different notification channel (Slack, PagerDuty, etc.),
+# add additional contact points below.
+
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: github-ct-dispatch
+    receivers:
+      - uid: github_dispatch_webhook
+        type: webhook
+        settings:
+          url: "https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/dispatches"
+          httpMethod: POST
+          username: ""
+          password: ""
+        disableResolveMessage: false
+        secureSettings:
+          authorization: "Bearer ${GITHUB_DISPATCH_TOKEN}"
+        # Custom HTTP headers (set via UI or secure settings)
+        # Authorization: token ${GITHUB_DISPATCH_TOKEN}
+        # Content-Type: application/json

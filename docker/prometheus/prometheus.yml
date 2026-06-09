@@ -1,0 +1,26 @@
+# Prometheus configuration for MLOps-Patent drift monitoring.
+#
+# Scrapes the inference API's /metrics endpoint for:
+#   - patent_drift_score_ks_statistic      (Gauge)
+#   - patent_drift_score_ks_pvalue         (Gauge)
+#   - patent_drift_score_mean_shift        (Gauge)
+#   - patent_drift_embedding_mean_shift    (Gauge)
+#   - patent_drift_last_checked_timestamp_seconds (Gauge)
+#   - patent_drift_new_samples_total       (Gauge)
+#   - patent_drift_score_distribution      (Histogram)
+#   - patent_model_info                    (Gauge)
+#   - patent_data_total_rows               (Gauge)
+#   - patent_data_embedding_dim            (Gauge)
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  - job_name: "patent-inference"
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "inference-lb:80"
+        labels:
+          service: "patent-inference"
