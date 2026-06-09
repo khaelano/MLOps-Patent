@@ -24,11 +24,11 @@ jobs:
     environment: Patent Model & Dataset Storage
 
     env:
-      # Python
       UV_SYSTEM_PYTHON: "1"
       PYTHONUNBUFFERED: "1"
-      # MLflow client (connects to the server we start below)
       MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_HUB_DISABLE_TELEMETRY: "1"
 
     steps:
       - uses: actions/checkout@v4
@@ -42,6 +42,13 @@ jobs:
       - name: Install Python dependencies
         run: |
           uv sync
+
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-models-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: hf-models-${{ runner.os }}-
 
       - name: Pull dataset from DVC remote
         env:
@@ -230,6 +237,8 @@ jobs:
       UV_SYSTEM_PYTHON: "1"
       PYTHONUNBUFFERED: "1"
       MLFLOW_TRACKING_URI: http://127.0.0.1:5000
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      HF_HUB_DISABLE_TELEMETRY: "1"
 
     steps:
       - uses: actions/checkout@v4

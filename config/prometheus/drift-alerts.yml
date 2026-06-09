@@ -34,14 +34,15 @@ groups:
         expr: patent_drift_score_ks_pvalue < 0.01
         for: 5m
         labels:
-          severity: warning
+          severity: info
           component: patent-model
         annotations:
-          summary: "Patent model drift — significant distribution shift (p={{ $value }})"
+          summary: "Patent model - KS p-value low (p={{ $value }})"
           description: >
-            The KS test p-value is {{ $value }}, indicating a statistically
-            significant shift in anomaly score distributions.  Retraining
-            is recommended.
+            The KS test p-value is {{ $value }}.  Note: with large sample
+            sizes, even small distribution shifts produce low p-values.
+            This alert is informational only; PatentDriftHighKS is the
+            primary drift signal.
 
       - alert: PatentDriftMeanShift
         expr: abs(patent_drift_score_mean_shift) > 0.15

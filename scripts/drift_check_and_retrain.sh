@@ -52,11 +52,6 @@ if [ -z "$ks_pval" ] || [ -z "$ks_stat" ]; then
 fi
 
 # ── Step 3: Compare against thresholds ────────────────────────────────────
-if awk "BEGIN { exit !($ks_pval < $PVALUE_THRESHOLD) }"; then
-    log "DRIFT DETECTED: p-value $ks_pval < threshold $PVALUE_THRESHOLD"
-    DRIFT_DETECTED=1
-fi
-
 if awk "BEGIN { exit !($ks_stat > $KS_THRESHOLD) }"; then
     log "DRIFT DETECTED: KS statistic $ks_stat > threshold $KS_THRESHOLD"
     DRIFT_DETECTED=1

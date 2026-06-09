@@ -122,8 +122,17 @@ def _dvc_commit(paths: list[Path], message: str, *, dry_run: bool = False) -> No
 
     try:
         for p in paths:
-            if p.exists():
-                subprocess.run(["dvc", "add", str(p)], check=True, capture_output=True)
+            if not p.exists():
+                continue
+            target = str(p)
+            # If path is inside data/raw/ (a DVC dep in dvc.yaml), dvc add
+            # on individual files within it creates conflicting .dvc files.
+            # Use dvc add on data/raw/ itself to capture all changes.
+            if str(RAW_DATA_DIR) in str(p.resolve()) and str(p.resolve()) != str(
+                RAW_DATA_DIR.resolve()
+            ):
+                target = str(RAW_DATA_DIR)
+            subprocess.run(["dvc", "add", target], check=True, capture_output=True)
         subprocess.run(
             ["dvc", "commit"],
             check=True,
