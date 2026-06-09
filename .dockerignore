@@ -1,0 +1,47 @@
+# Exclude large/unnecessary directories from Docker build context
+
+# Version control and build artifacts
+.git
+.gitignore
+.dvc
+.dvcignore
+
+# Python cache and virtual environments
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+.eggs
+.venv
+venv
+env
+
+# Project data (handled separately in volumes)
+data/
+models/
+reports/
+
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test and coverage reports
+.pytest_cache
+.coverage
+htmlcov/
+dist/
+build/
+
+# Documentation
+docs/_build/
+
+# Temporary files
+*.tmp
+*.log
