@@ -35,6 +35,8 @@ jobs:
       MLFLOW_TRACKING_URI: http://127.0.0.1:5000
 
     steps:
+      - uses: actions/checkout@v4
+
       - uses: ./.github/actions/setup-python
 
       - uses: ./.github/actions/dvc-pull
