@@ -20,6 +20,7 @@ jobs:
   train-evaluate-register:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/_train-evaluate-register.yml
+    environment: Patent Model & Dataset Storage
     secrets: inherit
     with:
       pr-number: ${{ github.event.pull_request.number }}
@@ -117,4 +118,5 @@ jobs:
   docker-release:
     if: github.event_name == 'push'
     uses: ./.github/workflows/_docker-build-push.yml
+    environment: Patent Model & Dataset Storage
     secrets: inherit
