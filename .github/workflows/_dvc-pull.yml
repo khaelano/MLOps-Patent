@@ -2,13 +2,6 @@ name: "DVC Pull (Reusable)"
 
 on:
   workflow_call:
-    secrets:
-      DVC_S3_ACCESS_KEY:
-        required: true
-      DVC_S3_SECRET_KEY:
-        required: true
-      DVC_S3_ENDPOINT:
-        required: true
   workflow_dispatch:
 
 jobs:

@@ -13,23 +13,6 @@ on:
         required: false
         type: string
         default: ""
-    secrets:
-      DVC_S3_ACCESS_KEY:
-        required: true
-      DVC_S3_SECRET_KEY:
-        required: true
-      DVC_S3_ENDPOINT:
-        required: true
-      MLFLOW_S3_ACCESS_KEY:
-        required: true
-      MLFLOW_S3_SECRET_KEY:
-        required: true
-      MLFLOW_S3_ENDPOINT:
-        required: true
-      MLFLOW_DB_URI:
-        required: true
-      MLFLOW_S3_BUCKET:
-        required: true
     outputs:
       run_id:
         description: "MLflow run ID from training"

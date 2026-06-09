@@ -8,16 +8,6 @@ on:
         required: false
         type: boolean
         default: false
-    secrets:
-      DVC_S3_ACCESS_KEY:
-        required: true
-      DVC_S3_SECRET_KEY:
-        required: true
-      DVC_S3_ENDPOINT:
-        required: true
-      HF_TOKEN:
-        description: "HuggingFace API token for gated embedder models"
-        required: false
   workflow_dispatch:
     inputs:
       force:
