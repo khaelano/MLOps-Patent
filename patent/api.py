@@ -117,6 +117,10 @@ async def lifespan(app: FastAPI):
     mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     logger.info(f"MLflow tracking URI: {MLFLOW_TRACKING_URI}")
 
+    # Log embedder cache configuration
+    hf_home = os.environ.get("HF_HOME", "<not set>")
+    logger.info(f"HuggingFace cache directory: {hf_home}")
+
     logger.info(f"Loading embedder: {EMBEDDER_SPEC}")
     _embedder = get_embedder(EMBEDDER_SPEC)
     logger.info(f"Embedder loaded (dim={_embedder.embedding_dim})")

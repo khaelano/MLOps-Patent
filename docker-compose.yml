@@ -33,21 +33,14 @@ services:
       - patent-net
     restart: unless-stopped
 
-  # ── Inference server — MLflow pyfunc image, FastAPI entrypoint ──────────
-  # The pyfunc image built via `mlflow models build-docker` already contains
-  # the patent package, all dependencies, and the model files.  We override
-  # the entrypoint to run *our* FastAPI app instead of MLflow's scoring_server
-  # so that /health, /predict, AND /metrics are all available from one service.
+  # ── Inference server — Custom FastAPI app exposing performance metrics ────────
+  # Builds from docker/app/Dockerfile: lightweight Python 3.10 image with all
+  # dependencies. Exposes /health, /predict, and /metrics endpoints via FastAPI.
   inference-server:
-    image: ghcr.io/khaelano/mlops-patent:latest
-    entrypoint:
-      - python
-      - -m
-      - uvicorn
-      - patent.api:app
-      - --host
-      - "0.0.0.0"
-      - --port
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    expose:
       - "8000"
     deploy:
       replicas: 3
