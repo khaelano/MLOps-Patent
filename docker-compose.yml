@@ -88,8 +88,80 @@ services:
     networks:
       - patent-net
 
+  # ── Monitoring stack ────────────────────────────────────────────────────
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro,Z
+      - ./config/prometheus/drift-alerts.yml:/etc/prometheus/drift-alerts.yml:ro,Z
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    networks:
+      - patent-net
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    ports:
+      - "${ALERTMANAGER_PORT:-9093}:9093"
+    volumes:
+      - ./config/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro,Z
+      - alertmanager-data:/alertmanager
+    restart: unless-stopped
+    networks:
+      - patent-net
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro,Z
+      - ./config/grafana/dashboards:/etc/grafana/dashboards:ro,Z
+    restart: unless-stopped
+    networks:
+      - patent-net
+
+  drift-webhook-bridge:
+    build:
+      context: .
+      dockerfile: docker/app/Dockerfile
+    entrypoint:
+      - python
+      - /app/config/alertmanager/webhook_bridge.py
+    ports:
+      - "${BRIDGE_PORT:-9099}:9099"
+    environment:
+      - BRIDGE_HOST=0.0.0.0
+      - BRIDGE_PORT=9099
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+    volumes:
+      - ./config/alertmanager/webhook_bridge.py:/app/config/alertmanager/webhook_bridge.py:ro,Z
+      - ./.env:/app/.env:ro
+    restart: unless-stopped
+    networks:
+      - patent-net
+
 volumes:
   embedder-cache:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:
 
 networks:
   patent-net:

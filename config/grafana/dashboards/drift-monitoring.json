@@ -1,0 +1,192 @@
+{
+  "title": "Patent Drift Monitoring",
+  "tags": ["patent", "drift"],
+  "refresh": "30s",
+  "panels": [
+    {
+      "title": "KS Statistic",
+      "type": "gauge",
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 6},
+      "targets": [
+        {
+          "expr": "patent_drift_score_ks_statistic",
+          "legendFormat": "KS"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.15},
+              {"color": "red", "value": 0.3}
+            ]
+          },
+          "min": 0,
+          "max": 1
+        }
+      }
+    },
+    {
+      "title": "KS P-Value",
+      "type": "gauge",
+      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 6},
+      "targets": [
+        {
+          "expr": "patent_drift_score_ks_pvalue",
+          "legendFormat": "p-value"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "yellow", "value": 0.01},
+              {"color": "green", "value": 0.05}
+            ]
+          },
+          "min": 0,
+          "max": 1
+        }
+      }
+    },
+    {
+      "title": "Mean Score Shift",
+      "type": "gauge",
+      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 6},
+      "targets": [
+        {
+          "expr": "abs(patent_drift_score_mean_shift)",
+          "legendFormat": "|Δμ|"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.1},
+              {"color": "red", "value": 0.15}
+            ]
+          },
+          "min": 0,
+          "max": 0.5
+        }
+      }
+    },
+    {
+      "title": "Embedding Mean Shift",
+      "type": "gauge",
+      "gridPos": {"x": 0, "y": 6, "w": 8, "h": 6},
+      "targets": [
+        {
+          "expr": "patent_drift_embedding_mean_shift",
+          "legendFormat": "emb Δ"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.5},
+              {"color": "red", "value": 1.0}
+            ]
+          },
+          "min": 0,
+          "max": 2
+        }
+      }
+    },
+    {
+      "title": "Score Distribution",
+      "type": "timeseries",
+      "gridPos": {"x": 8, "y": 6, "w": 16, "h": 10},
+      "targets": [
+        {
+          "expr": "rate(patent_drift_score_distribution_bucket[5m])",
+          "legendFormat": "le={{le}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "title": "Prediction Score Distribution",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(patent_prediction_scores_bucket[5m])",
+          "legendFormat": "le={{le}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "title": "Predictions / sec",
+      "type": "stat",
+      "gridPos": {"x": 12, "y": 12, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "rate(patent_predictions_total[1m])",
+          "legendFormat": "req/s"
+        }
+      ]
+    },
+    {
+      "title": "Model Version",
+      "type": "stat",
+      "gridPos": {"x": 18, "y": 12, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "patent_model_info",
+          "legendFormat": "v{{model_version}}"
+        }
+      ]
+    },
+    {
+      "title": "Training Rows",
+      "type": "stat",
+      "gridPos": {"x": 12, "y": 16, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "patent_data_total_rows",
+          "legendFormat": "rows"
+        }
+      ]
+    },
+    {
+      "title": "Last Drift Check",
+      "type": "stat",
+      "gridPos": {"x": 18, "y": 16, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "(time() - patent_drift_last_checked_timestamp_seconds) / 3600",
+          "legendFormat": "hours ago"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Alertmanager configuration — routes drift alerts to retraining.
+#
+# When Prometheus fires a PatentDrift* alert, Alertmanager POSTs a webhook
+# to the bridge script, which triggers the GitHub Actions workflow.
+#
+# Setup:
+#   1. Start alertmanager with:  alertmanager --config.file=config/alertmanager/alertmanager.yml
+#   2. Point Prometheus at it in prometheus.yml:
+#        alerting:
+#          alertmanagers:
+#            - static_configs: [{ targets: ["localhost:9093"] }]
+#   3. The webhook receiver runs scripts/drift_check_and_retrain.sh with
+#      GITHUB_TOKEN + GITHUB_REPOSITORY set to trigger GitHub Actions.
+#
+# Alternatively, start the webhook bridge manually:
+#   python config/alertmanager/webhook_bridge.py
+# ──────────────────────────────────────────────────────────────────────────────
+
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname"]
+  group_wait: 10s
+  group_interval: 10s
+  repeat_interval: 12h
+  receiver: drift-webhook
+  routes:
+    - match:
+        component: patent-model
+      receiver: drift-webhook
+
+receivers:
+  - name: drift-webhook
+    webhook_configs:
+      - url: "http://localhost:9099/drift-alert"
+        send_resolved: false
+        max_alerts: 1

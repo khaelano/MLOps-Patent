@@ -151,6 +151,21 @@ continuous-dry-run: requirements
 drift-check: requirements
 	uv run $(PYTHON_INTERPRETER) patent/cli.py drift-check
 
+## Run drift check and trigger retraining if drift exceeds threshold (no Prometheus needed)
+.PHONY: drift-retrain
+drift-retrain:
+	./scripts/drift_check_and_retrain.sh
+
+## Start the Alertmanager webhook bridge for drift-triggered retraining
+.PHONY: drift-bridge
+drift-bridge:
+	uv run $(PYTHON_INTERPRETER) config/alertmanager/webhook_bridge.py
+
+## Push fake drift metrics to test alerting pipeline
+.PHONY: simulate-drift
+simulate-drift: requirements
+	uv run $(PYTHON_INTERPRETER) patent/cli.py simulate-drift
+
 
 #################################################################################
 # Self Documenting Commands                                                     #

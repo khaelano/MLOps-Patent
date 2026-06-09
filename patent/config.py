@@ -2,6 +2,7 @@ import atexit
 import os
 from pathlib import Path
 import shutil
+import time
 
 from dotenv import load_dotenv
 from loguru import logger
@@ -59,15 +60,26 @@ def project_tempdir() -> Path:
 
 
 def cleanup_project_temp() -> None:
-    """Remove the entire project ``.tmp/`` directory and all contents.
+    """Remove project ``.tmp/`` subdirectories older than 5 minutes.
 
     Safe to call at any time — is a no-op if the directory does not
-    exist.  Registered as an :mod:`atexit` handler so the project temp
-    area is automatically cleaned when the Python process exits normally.
+    exist.  Registered as an :mod:`atexit` handler to clean up orphaned
+    temp directories from crashed runs, but leaves recently-created
+    directories intact so that multiprocessing workers can finish.
     """
-    if TMP_DIR.exists():
-        shutil.rmtree(TMP_DIR, ignore_errors=True)
-        logger.debug(f"Cleaned up project temp directory: {TMP_DIR}")
+    if not TMP_DIR.exists():
+        return
+
+    now = time.time()
+    cutoff = 300  # 5 minutes
+    for child in TMP_DIR.iterdir():
+        if child.is_dir():
+            try:
+                mtime = child.stat().st_mtime
+                if now - mtime > cutoff:
+                    shutil.rmtree(child, ignore_errors=True)
+            except OSError:
+                pass
 
 
 def _timestamp_hex() -> str:

@@ -517,8 +517,47 @@ def continuous_cmd(
         )
 
 
-if __name__ == "__main__":
-    app()
+@app.command("simulate-drift")
+def simulate_drift_cmd(
+    pvalue: float = typer.Option(0.001, help="Fake KS p-value to push (low = more drift)"),
+    ks_statistic: float = typer.Option(0.7, help="Fake KS statistic to push (high = more drift)"),
+    mean_shift: float = typer.Option(0.25, help="Fake mean score shift to push"),
+):
+    """Push artificial drift metrics into Prometheus gauges to test alerting.
+
+    Sets the Prometheus drift gauges to values that would trigger
+    ``PatentDriftHighKS``, ``PatentDriftPValueLow``, and ``PatentDriftMeanShift``
+    alerts.  Use this to verify that Prometheus → Alertmanager → retrain
+    chain works end-to-end.
+
+    After running, check the ``/drift`` endpoint and Grafana dashboards.
+    """
+    import numpy as np
+
+    from patent.monitoring.metrics import update_drift_metrics
+
+    fake_scores = np.array([0.1, 0.9, 0.5, 0.95, 0.2, 0.8], dtype=np.float32)
+
+    update_drift_metrics(
+        ks_statistic=ks_statistic,
+        ks_pvalue=pvalue,
+        mean_shift=mean_shift,
+        emb_shift=1.5,
+        n_samples=1000,
+        scores=fake_scores,
+        model_version="simulated",
+        embedding_dim=384,
+        total_rows=5000,
+    )
+
+    typer.secho(
+        f"Fake drift pushed: KS={ks_statistic:.3f}  p={pvalue:.4f}  Δμ={mean_shift:.3f}",
+        fg="red",
+    )
+    typer.secho(
+        "Check /drift endpoint and Grafana. Alerts should fire within 5 minutes.",
+        fg="yellow",
+    )
 
 
 @app.command("drift-check")
@@ -534,13 +573,19 @@ def drift_check_cmd(
         "--embedder",
         help="Embedder spec: '<protocol>:<model>'",
     ),
+    model_path: Path | None = typer.Option(
+        None,
+        "--model-path",
+        "-m",
+        help="Path to local .lshif model file (skips MLflow Registry lookup)",
+    ),
 ):
     """Check for data drift by comparing current data against the stored baseline.
 
-    Loads the Production model from MLflow, scores a random sample of recent
-    data, and compares the resulting anomaly-score distribution against the
-    baseline stored in ``data/interim/drift_baseline/``.  Updates Prometheus
-    drift gauges so Grafana can visualise and alert on drift.
+    Loads the model from MLflow Registry (or a local .lshif file via
+    ``--model-path``), scores a random sample of recent data, and compares
+    the anomaly-score distribution against the baseline.  Updates Prometheus
+    drift gauges.
     """
     import os
     import shutil
@@ -591,27 +636,40 @@ def drift_check_cmd(
         indices = np.sort(indices)
         sample_embeddings = np.array(mmap[indices], dtype=np.float32)
 
-        # Load Production model and score
-        mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
-        mlflow.set_tracking_uri(mlflow_uri)
+        # Load model (local file or MLflow Registry)
+        if model_path is not None:
+            if not model_path.exists():
+                typer.secho(f"Model file not found: {model_path}", fg="red")
+                raise typer.Exit(1)
+            model = LSHiForest.load(str(model_path))
+            model_version = "local"
+            logger.info(f"Loaded local model from {model_path}")
+        else:
+            mlflow_uri = os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000")
+            mlflow.set_tracking_uri(mlflow_uri)
 
-        client = MlflowClient()
-        prod_versions = client.get_latest_versions("patent-lshiforest", stages=["Production"])
+            client = MlflowClient()
+            prod_versions = client.get_latest_versions("patent-lshiforest", stages=["Production"])
 
-        if not prod_versions:
-            typer.secho("No Production model found in MLflow Registry.", fg="red")
-            raise typer.Exit(1)
+            if not prod_versions:
+                typer.secho(
+                    "No Production model found in MLflow Registry. "
+                    "Use --model-path to specify a local model file.",
+                    fg="red",
+                )
+                raise typer.Exit(1)
 
-        prod = prod_versions[0]
-        model_version = str(prod.version)
-        artifact_uri = f"runs:/{prod.run_id}/model.lshif"
+            prod = prod_versions[0]
+            model_version = str(prod.version)
+            artifact_uri = f"runs:/{prod.run_id}/model.lshif"
 
-        with TemporaryDirectory() as model_tmp:
-            local_path = mlflow.artifacts.download_artifacts(
-                artifact_uri=artifact_uri, dst_path=model_tmp
-            )
-            model = LSHiForest.load(str(local_path))
-            sample_scores = model.score_chunked(mmap, total_rows)
+            with TemporaryDirectory() as model_tmp:
+                local_path = mlflow.artifacts.download_artifacts(
+                    artifact_uri=artifact_uri, dst_path=model_tmp
+                )
+                model = LSHiForest.load(str(local_path))
+
+        sample_scores = model.score_chunked(mmap, total_rows)
 
         # Compute drift
         report = compute_drift_metrics(sample_embeddings, sample_scores, baseline=baseline)
@@ -639,3 +697,7 @@ def drift_check_cmd(
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+if __name__ == "__main__":
+    app()

@@ -1,0 +1,68 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Prometheus alerting rules for patent drift detection.
+#
+# Scrapes the /drift endpoint exposed by the inference server.
+# The metrics are updated whenever `patent drift-check` runs (schedule via cron).
+#
+# Usage:
+#   prometheus --config.file=prometheus.yml
+#
+# In prometheus.yml, add:
+#   rule_files:
+#     - "config/prometheus/drift-alerts.yml"
+# ──────────────────────────────────────────────────────────────────────────────
+
+groups:
+  - name: patent_drift
+    interval: 30s
+    rules:
+      - alert: PatentDriftHighKS
+        expr: patent_drift_score_ks_statistic > 0.3
+        for: 5m
+        labels:
+          severity: warning
+          component: patent-model
+        annotations:
+          summary: "Patent model data drift detected (KS={{ $value }})"
+          description: >
+            The two-sample KS statistic comparing current anomaly scores
+            against the training baseline is {{ $value }}, exceeding the
+            threshold of 0.3.  The underlying data distribution may have
+            shifted enough to degrade model performance.
+
+      - alert: PatentDriftPValueLow
+        expr: patent_drift_score_ks_pvalue < 0.01
+        for: 5m
+        labels:
+          severity: warning
+          component: patent-model
+        annotations:
+          summary: "Patent model drift — significant distribution shift (p={{ $value }})"
+          description: >
+            The KS test p-value is {{ $value }}, indicating a statistically
+            significant shift in anomaly score distributions.  Retraining
+            is recommended.
+
+      - alert: PatentDriftMeanShift
+        expr: abs(patent_drift_score_mean_shift) > 0.15
+        for: 10m
+        labels:
+          severity: info
+          component: patent-model
+        annotations:
+          summary: "Patent model mean score shift (Δμ={{ $value }})"
+          description: >
+            Mean anomaly score has shifted by {{ $value }} relative to
+            the baseline.  Persistent shifts may indicate concept drift.
+
+      - alert: PatentNoRecentDriftCheck
+        expr: (time() - patent_drift_last_checked_timestamp_seconds) > 86400
+        for: 1h
+        labels:
+          severity: info
+          component: patent-model
+        annotations:
+          summary: "No drift check in over 24 hours"
+          description: >
+            The last drift check was more than 24 hours ago.
+            Ensure `patent drift-check` is running on schedule.
