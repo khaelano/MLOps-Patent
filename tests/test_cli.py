@@ -24,7 +24,7 @@ def test_cli_data_help():
 def test_cli_model_train_help():
     result = runner.invoke(app, ["model", "train", "--help"])
     assert result.exit_code == 0
-    assert "LSHiForest" in result.output
+    assert "isolation trees" in result.output
     assert "--num-trees" in result.output
     assert "--max-depth" in result.output
 

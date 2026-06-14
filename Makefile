@@ -49,7 +49,7 @@ typecheck:
 ## Run tests (excludes integration tests needing external services)
 .PHONY: test
 test:
-	python -m pytest tests --ignore=tests/test_data_ingestion.py --ignore=tests/test_registry.py
+	uv run pytest tests --ignore=tests/test_data_ingestion.py --ignore=tests/test_registry.py --ignore=tests/test_mlflow_integration.py
 
 
 ## Set up Python interpreter environment
