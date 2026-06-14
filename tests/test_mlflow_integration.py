@@ -94,8 +94,11 @@ class TestTrainModelMlflow:
         artifacts = [a.path for a in client.list_artifacts(result["run_id"])]
         assert "model.lshif" in artifacts
 
-    def test_train_without_mlflow_skips_tracking(self, sample_embeddings_dir: Path):
+    def test_train_without_mlflow_skips_tracking(
+        self, sample_embeddings_dir: Path, monkeypatch
+    ):
         """Without mlflow_context, no run is created."""
+        monkeypatch.delenv("MLFLOW_TRACKING_URI", raising=False)
         temp_dir = Path(tempfile.mkdtemp())
         try:
             result = train_model(
