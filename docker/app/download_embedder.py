@@ -15,17 +15,31 @@ from embed_anything import Dtype, EmbeddingModel, ONNXModel, TextEmbedConfig, Wh
 
 
 def main():
-    import os, shutil, subprocess
+    import os, shutil, subprocess, time
 
     hf_home = os.environ.get("HF_HOME", "/root/.cache/huggingface")
     print(f"HF_HOME={hf_home}")
     print("Downloading ONNX embedder...", flush=True)
 
-    model = EmbeddingModel.from_pretrained_onnx(
-        WhichModel.Bert,
-        model_name=ONNXModel.AllMiniLML6V2Q,
-        dtype=Dtype.Q4F16,
-    )
+    # Retry with exponential backoff — GitHub Actions runners share IPs and
+    # HuggingFace frequently returns 429 (rate limit) on the first attempt.
+    model = None
+    max_retries = 5
+    for attempt in range(1, max_retries + 1):
+        try:
+            model = EmbeddingModel.from_pretrained_onnx(
+                WhichModel.Bert,
+                model_name=ONNXModel.AllMiniLML6V2Q,
+                dtype=Dtype.Q4F16,
+            )
+            break
+        except ValueError as e:
+            if "429" in str(e) and attempt < max_retries:
+                delay = 2 ** attempt  # 2, 4, 8, 16, 32 seconds
+                print(f"HTTP 429 rate-limited, retrying in {delay}s (attempt {attempt}/{max_retries})...", flush=True)
+                time.sleep(delay)
+            else:
+                raise
     config = TextEmbedConfig(chunk_size=256, batch_size=32)
     dummy = model.embed_query(["preload"], config=config)
     dim = len(dummy[0].embedding)

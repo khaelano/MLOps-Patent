@@ -41,8 +41,18 @@ RUN uv pip install --system --no-cache-dir -e .
 # ── Pre-download the ONNX embedder model ─────────────────────────────────────
 # The AllMiniLML6V2Q model (~5 MB, 4-bit quantized) is fetched from HuggingFace
 # at build time so the container never needs internet access.
+# Pass --build-arg HF_TOKEN=$(hf_token) for authenticated requests
+# (much higher rate limits — avoids 429 errors on shared CI runners).
+ARG HF_TOKEN
 COPY docker/app/download_embedder.py /tmp/download_embedder.py
-RUN python /tmp/download_embedder.py && \
+RUN --mount=type=secret,id=hf_token,required=false \
+    if [ -f /run/secrets/hf_token ] && [ -s /run/secrets/hf_token ]; then \
+        export HF_TOKEN=$(cat /run/secrets/hf_token); \
+        echo "HF_TOKEN set (length=${#HF_TOKEN})"; \
+    else \
+        echo "No HF_TOKEN provided — using anonymous access"; \
+    fi; \
+    python /tmp/download_embedder.py && \
     rm /tmp/download_embedder.py
 
 # ── Stage 2: Runtime ───────────────────────────────────────────────────────────
