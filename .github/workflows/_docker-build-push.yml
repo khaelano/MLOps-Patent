@@ -2,6 +2,11 @@ name: "Docker Build & Push (Reusable)"
 
 on:
   workflow_call:
+    inputs:
+      push:
+        type: boolean
+        default: true
+        description: "Push the built image to GHCR (false = dry-run build only)"
   workflow_dispatch:
 
 jobs:
@@ -26,30 +31,38 @@ jobs:
           mlflow-db-uri: ${{ secrets.MLFLOW_DB_URI }}
           mlflow-s3-bucket: ${{ secrets.MLFLOW_S3_BUCKET }}
 
+      - name: Download model + baseline from MLflow
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+        run: |
+          uv run python docker/app/download_model.py \
+            --model-name patent-lshiforest \
+            --version Production \
+            --output-dir model
+
       - name: Log in to GHCR
+        if: inputs.push
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Docker image
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
-          AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
-          MLFLOW_MODEL_NAME: patent-lshiforest
+      - name: Build Docker image
         run: |
-          uv run mlflow models build-docker \
-            --model-uri "models:/${MLFLOW_MODEL_NAME}/Production" \
-            --name "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest" \
-            --env-manager local
+          docker build \
+            -f docker/app/Dockerfile \
+            --build-arg MODEL_SOURCE=./model \
+            -t "ghcr.io/${{ github.repository_owner }}/mlops-patent:model-v$(cat model/model_version.txt)" \
+            -t "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest" \
+            .
 
-          docker tag \
-            "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest" \
-            "ghcr.io/${{ github.repository_owner }}/mlops-patent:${{ github.sha }}"
-
+      - name: Push Docker image
+        if: inputs.push
+        run: |
+          docker push "ghcr.io/${{ github.repository_owner }}/mlops-patent:model-v$(cat model/model_version.txt)"
           docker push "ghcr.io/${{ github.repository_owner }}/mlops-patent:latest"
-          docker push "ghcr.io/${{ github.repository_owner }}/mlops-patent:${{ github.sha }}"
 
       - uses: ./.github/actions/stop-mlflow

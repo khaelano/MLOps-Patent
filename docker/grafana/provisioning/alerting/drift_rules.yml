@@ -1,11 +1,11 @@
 # Grafana alert rule: Data Drift Detected
 #
-# Triggers when KS test p-value drops below 0.05 for 5 minutes,
-# indicating a statistically significant shift in the anomaly score
-# distribution compared to the Production baseline.
+# Triggers when the inference server's consensus drift detector
+# (≥2-of-4 signals: KS test, Wasserstein distance, mean shift,
+# energy distance) flags sustained drift for 5 minutes.
 #
-# This alert is wired to a GitHub repository_dispatch contact point
-# that triggers the continuous-training workflow.
+# Wired to a GitHub repository_dispatch contact point that triggers
+# the continuous-training workflow.
 
 apiVersion: 1
 
@@ -15,69 +15,47 @@ groups:
     folder: "Alerts"
     interval: 1m
     rules:
-      - uid: patent_drift_ks_pvalue
-        title: "Data Drift Detected — KS p-value dropped"
+      - uid: patent_drift_detected
+        title: "Data Drift Detected"
         condition: C
         data:
           - refId: A
             relativeTimeRange:
               from: 600
               to: 0
-            datasourceUid: "${DS_PROMETHEUS}"
+            datasourceUid: "prometheus"
             model:
-              expr: |
-                patent_drift_score_ks_pvalue{service="patent-inference"}
+              expr: 'patent_drift_detected{service="patent-inference"}'
               intervalMs: 60000
               maxDataPoints: 43200
               refId: A
           - refId: B
-            relativeTimeRange:
-              from: 600
-              to: 0
-            datasourceUid: "${DS_PROMETHEUS}"
+            datasourceUid: "__expr__"
             model:
-              expr: |
-                abs(patent_drift_score_mean_shift{service="patent-inference"})
-              intervalMs: 60000
-              maxDataPoints: 43200
+              type: reduce
+              reducer: last
+              expression: A
               refId: B
           - refId: C
             datasourceUid: "__expr__"
             model:
-              type: "classic_conditions"
-              refId: C
+              type: threshold
+              expression: B
               conditions:
                 - evaluator:
-                    params: [0.05]
-                    type: "lt"
-                  operator:
-                    type: "and"
-                  query:
-                    params: ["A"]
-                  reducer:
-                    params: []
-                    type: "last"
-                  type: "query"
-                - evaluator:
-                    params: [0.03]
-                    type: "gt"
-                  operator:
-                    type: "and"
-                  query:
-                    params: ["B"]
-                  reducer:
-                    params: []
-                    type: "last"
-                  type: "query"
+                    params: [0]
+                    type: gt
+              refId: C
         noDataState: NoData
         execErrState: Error
         for: 5m
         annotations:
-          summary: "Data drift detected — KS p-value {{ $values.A.Value }}"
+          summary: "Data drift detected by consensus detector"
           description: |
-            Score distribution has shifted significantly from the Production baseline.
-            KS p-value: {{ $values.A.Value }}
-            Mean shift: {{ $values.B.Value }}
+            The inference server's drift detector has flagged a sustained
+            distribution shift.  KS p-value and mean shift metrics contain
+            the detailed diagnostics.
+
             This will trigger the continuous-training workflow.
         labels:
           severity: warning

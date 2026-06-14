@@ -1,0 +1,62 @@
+name: "Update DVC"
+description: "Track changes with DVC, commit metadata to git, and push to remote"
+
+inputs:
+  dvc-targets:
+    description: "Files for 'dvc add' (space-separated). Leave empty to skip."
+    required: false
+    default: ""
+  git-files:
+    description: "Files to git-add and commit"
+    required: true
+  message:
+    description: "Commit message"
+    required: true
+  do-dvc-push:
+    description: "Run 'dvc push' after 'dvc add'"
+    required: false
+    default: "true"
+  aws-access-key-id:
+    description: "AWS access key for DVC S3 remote"
+    required: false
+    default: ""
+  aws-secret-access-key:
+    description: "AWS secret key for DVC S3 remote"
+    required: false
+    default: ""
+  aws-endpoint-url:
+    description: "S3 endpoint URL"
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    - name: Track with DVC
+      if: inputs.dvc-targets != ''
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_ENDPOINT_URL_S3: ${{ inputs.aws-endpoint-url }}
+        DVC_S3_ENDPOINTURL: ${{ inputs.aws-endpoint-url }}
+      run: uv run dvc add ${{ inputs.dvc-targets }}
+
+    - name: Push to DVC remote
+      if: inputs.do-dvc-push == 'true' && inputs.dvc-targets != ''
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.aws-access-key-id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.aws-secret-access-key }}
+        AWS_ENDPOINT_URL_S3: ${{ inputs.aws-endpoint-url }}
+        DVC_S3_ENDPOINTURL: ${{ inputs.aws-endpoint-url }}
+      run: uv run dvc push --verbose
+
+    - name: Commit and push to git
+      shell: bash
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add ${{ inputs.git-files }}
+        git diff --staged --quiet || git commit -m "${{ inputs.message }}"
+        git push

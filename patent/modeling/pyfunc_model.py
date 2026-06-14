@@ -82,7 +82,7 @@ class LSHiForestPyfuncModel(mlflow.pyfunc.PythonModel):
         ----------
         model_input : pd.DataFrame
             Must contain a ``"texts"`` column where each row is a string
-            (title + abstract concatenation, same format as training).
+            (paper title, same format as training).
 
         Returns
         -------

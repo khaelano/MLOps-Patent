@@ -1,0 +1,128 @@
+name: "Model CT"
+
+on:
+  # ── Weekly schedule (Monday 02:00 UTC) ──────────────────────────────────
+  schedule:
+    - cron: "0 2 * * 1"
+
+  # ── Manual trigger ─────────────────────────────────────────────────────
+  workflow_dispatch:
+
+  # ── Triggered by Grafana alert (data drift detection) ───────────────────
+  repository_dispatch:
+    types:
+      - drift-detected
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: continuous-training
+  cancel-in-progress: true
+
+jobs:
+  # ──────────────────────────────────────────────────────────────────────────
+  # Step 1: Fetch new data from arXiv OAI-PMH
+  # ──────────────────────────────────────────────────────────────────────────
+  data-update:
+    runs-on: ubuntu-latest
+    environment: Patent Model & Dataset Storage
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-python
+
+      - uses: ./.github/actions/pull-dvc
+        with:
+          aws-access-key-id: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.DVC_S3_SECRET_KEY }}
+          aws-endpoint-url: ${{ secrets.DVC_S3_ENDPOINT }}
+
+      - name: Fetch arXiv OAI-PMH updates
+        shell: bash
+        run: |
+          uv run python patent/cli.py data update
+
+      - uses: ./.github/actions/update-dvc
+        with:
+          dvc-targets: "data/raw/"
+          git-files: "data/raw.dvc"
+          message: "dvc: update raw data tracking [skip ci]"
+          aws-access-key-id: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.DVC_S3_SECRET_KEY }}
+          aws-endpoint-url: ${{ secrets.DVC_S3_ENDPOINT }}
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Step 2: Process new data (reserialize → clean → embed) ONLY for new data
+  # ──────────────────────────────────────────────────────────────────────────
+  data-process:
+    needs: data-update
+    runs-on: ubuntu-latest
+    environment: Patent Model & Dataset Storage
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-python
+
+      - name: Pull latest DVC metadata from upstream
+        shell: bash
+        run: git pull origin ${{ github.ref_name }}
+
+      - name: Restore HuggingFace model cache
+        uses: actions/cache@v4
+        with:
+          path: .hf_cache
+          key: hf-embedder-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            hf-embedder-cache-${{ runner.os }}-
+
+      - uses: ./.github/actions/pull-dvc
+        with:
+          aws-access-key-id: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.DVC_S3_SECRET_KEY }}
+          aws-endpoint-url: ${{ secrets.DVC_S3_ENDPOINT }}
+
+      - name: Reproduce DVC preprocess stage (reserialize → clean → embed)
+        shell: bash
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.DVC_S3_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.DVC_S3_SECRET_KEY }}
+          AWS_ENDPOINT_URL_S3: ${{ secrets.DVC_S3_ENDPOINT }}
+          DVC_S3_ENDPOINTURL: ${{ secrets.DVC_S3_ENDPOINT }}
+        run: |
+          uv run dvc repro preprocess
+          uv run dvc push --verbose
+
+      - uses: ./.github/actions/update-dvc
+        with:
+          dvc-targets: ""
+          do-dvc-push: "false"
+          git-files: "dvc.lock"
+          message: "dvc: update pipeline lock after preprocess [skip ci]"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Step 3: Train, evaluate, and promote model if metrics improve
+  # ──────────────────────────────────────────────────────────────────────────
+  train-evaluate-register:
+    needs: data-process
+    uses: ./.github/workflows/_train-evaluate-register.yml
+    secrets: inherit
+    with:
+      experiment-name: "continuous-training"
+
+  # ──────────────────────────────────────────────────────────────────────────
+  # Step 4: Build and push self-contained Docker image
+  # (embeds .lshif model, drift baseline, and ONNX embedder)
+  # ──────────────────────────────────────────────────────────────────────────
+  docker-release:
+    needs: train-evaluate-register
+    uses: ./.github/workflows/_docker-build-push.yml
+    secrets: inherit
+
+

@@ -204,3 +204,5 @@ cython_debug/
 .mlflow/
 mlruns/
 mlflow.db
+# Added by code-review-graph
+.code-review-graph/
