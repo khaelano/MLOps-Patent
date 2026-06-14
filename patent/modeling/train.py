@@ -21,6 +21,7 @@ from patent.modeling.evaluate import (
     export_bottom_anomalies,
     export_top_anomalies,
 )
+from patent.monitoring.drift import BASELINE_DIR, save_drift_baseline
 from patent.utils import convert_parquet_to_memmap, flatten_dict, load_parquet_metadata
 
 
@@ -57,6 +58,28 @@ def process_embeddings(
     logger.success(f"Embeddings memmap path is {output_path}.")
 
     return num_dim, mmap_path
+
+
+def detect_mlflow() -> tuple[bool, str]:
+    """Check whether MLflow is configured and the tracking server is reachable.
+
+    Returns a tuple ``(available, message)`` where *available* is ``True``
+    when the environment variable ``MLFLOW_TRACKING_URI`` is set *and* the
+    server responds to a lightweight API call (listing experiments).
+
+    Use this to decide whether to skip or enable MLflow logging during
+    training when the caller hasn't explicitly requested it.
+    """
+    tracking_uri = os.environ.get("MLFLOW_TRACKING_URI")
+    if not tracking_uri:
+        return False, "MLFLOW_TRACKING_URI not set — MLflow logging disabled"
+
+    try:
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.MlflowClient().search_experiments(max_results=1)
+        return True, f"MLflow detected at {tracking_uri}"
+    except Exception as exc:
+        return False, f"MLflow at {tracking_uri} unreachable ({exc}) — MLflow logging disabled"
 
 
 def _log_pyfunc_model(model_path: str, model_params: dict[str, Any]) -> int | None:
@@ -115,8 +138,13 @@ def train_model(
 
     When *mlflow_context* is provided (e.g. ``{"experiment_name": "my-exp"}``),
     the model, training metrics, evaluation metrics, and anomaly exports are all
-    logged to a single MLflow run.  When *mlflow_context* is ``None``, MLflow is
-    skipped entirely.
+    logged to a single MLflow run.
+
+    When *mlflow_context* is ``None`` (the default), the function calls
+    :func:`detect_mlflow` to check whether MLflow is configured and the
+    tracking server is reachable.  If so, MLflow is auto-enabled with the
+    experiment name ``"patent-lshiforest"``.  If not, MLflow is skipped
+    and a warning-level message explains why.
 
     Returns a dict with keys ``output_dir``, ``eval_result``, ``run_id``,
     and ``pyfunc_version`` (each is ``None`` when MLflow is not active).
@@ -153,7 +181,7 @@ def train_model(
             shape=(total_rows, embedding_dim),
         )
 
-        # ── MLflow: set_experiment before start_run ─────────────────────
+        # ── MLflow: auto-detect or use explicit context ────────────────
         if mlflow_context is not None:
             experiment_name = mlflow_context.pop("experiment_name", None)
             if experiment_name:
@@ -161,8 +189,15 @@ def train_model(
             mlflow_run: Any = mlflow.start_run(**mlflow_context)
             using_mlflow = True
         else:
-            mlflow_run = nullcontext()
-            using_mlflow = False
+            mlflow_available, mlflow_msg = detect_mlflow()
+            logger.info(mlflow_msg)
+            if mlflow_available:
+                mlflow.set_experiment("patent-lshiforest")
+                mlflow_run = mlflow.start_run()
+                using_mlflow = True
+            else:
+                mlflow_run = nullcontext()
+                using_mlflow = False
 
         with mlflow_run:
             # ── Log model parameters ──
@@ -196,6 +231,13 @@ def train_model(
             )
             baseline_time = time.perf_counter() - t_score
             logger.success(f"Baseline scoring in {baseline_time:.2f}s")
+
+            # ── Save drift baseline for the inference server ────────────────
+            _save_baseline_sample(embeddings_mmap, baseline_scores, total_rows, pyfunc_version)
+
+            # ── Log drift baseline as MLflow artifact ────────────────────
+            if using_mlflow and BASELINE_DIR.exists():
+                mlflow.log_artifacts(str(BASELINE_DIR), artifact_path="drift_baseline")
 
             if using_mlflow:
                 total_time = time.perf_counter() - start_time
@@ -314,8 +356,15 @@ def evaluate_model(
         mlflow_run: Any = mlflow.start_run(**mlflow_context)
         using_mlflow = True
     else:
-        mlflow_run = nullcontext()
-        using_mlflow = False
+        mlflow_available, mlflow_msg = detect_mlflow()
+        logger.info(mlflow_msg)
+        if mlflow_available:
+            mlflow.set_experiment("patent-lshiforest")
+            mlflow_run = mlflow.start_run()
+            using_mlflow = True
+        else:
+            mlflow_run = nullcontext()
+            using_mlflow = False
 
     with mlflow_run:
         eval_result: dict[str, Any] = {}
@@ -403,3 +452,34 @@ def evaluate_model(
     logger.success(f"Evaluation metrics saved at {output_path}.")
 
     return eval_result
+
+
+# ── Drift baseline helper ───────────────────────────────────────────────────
+
+
+def _save_baseline_sample(
+    embeddings_mmap: np.ndarray,
+    scores: np.ndarray,
+    total_rows: int,
+    model_version: int | None = None,
+    max_samples: int = 10_000,
+) -> None:
+    """Save a random subset of embeddings and scores as the drift baseline.
+
+    Called during training so the inference server has a reference
+    distribution to compare against at prediction time.
+    """
+    n_sample = min(max_samples, total_rows)
+    rng = np.random.default_rng(42)
+    indices = rng.choice(total_rows, size=n_sample, replace=False)
+    indices.sort()  # sequential reads from the memmap
+
+    sample_embeddings = np.array(embeddings_mmap[indices], dtype=np.float32)
+    sample_scores = scores[indices].astype(np.float64)
+
+    version_str = str(model_version) if model_version is not None else None
+    save_drift_baseline(
+        embeddings=sample_embeddings,
+        scores=sample_scores,
+        model_version=version_str,
+    )

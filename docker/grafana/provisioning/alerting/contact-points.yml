@@ -18,13 +18,6 @@ contactPoints:
       - uid: github_dispatch_webhook
         type: webhook
         settings:
-          url: "https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/dispatches"
+          url: "http://inference-lb/dispatch"
           httpMethod: POST
-          username: ""
-          password: ""
         disableResolveMessage: false
-        secureSettings:
-          authorization: "Bearer ${GITHUB_DISPATCH_TOKEN}"
-        # Custom HTTP headers (set via UI or secure settings)
-        # Authorization: token ${GITHUB_DISPATCH_TOKEN}
-        # Content-Type: application/json

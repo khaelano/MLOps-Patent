@@ -56,7 +56,32 @@ The preprocessing pipeline (`patent/cli.py data reserialize | clean | embed`) tr
 3. **Embedding (`data embed`)**: Reads the clean parquet in chunks and passes the titles through the local HuggingFace `SentenceTransformers` model (`all-MiniLM-L6-v2`) to produce standard 384-dimensional numeric feature embeddings.
 4. **Storage:** Saves the embedded dataset into a pickled and partitioned Parquet format in `data/processed` for efficient downstream loading.
 
-### Running Preprocessing (End-to-End simulation)
+## 3. DVC Pipeline (Recommended)
+
+The data pipeline is also defined as a DVC pipeline in `dvc.yaml` for
+reproducibility and change tracking:
+
+```bash
+# Run the full pipeline with DVC (detects which stages need re-running)
+dvc repro
+
+# Run individual stages
+dvc repro preprocess   # reserialize → clean → embed
+dvc repro training     # train + evaluate (depends on preprocess)
+```
+
+### DVC Pipeline Stages
+
+| Stage | Command | Dependencies | Outputs |
+|-------|---------|-------------|---------|
+| `preprocess` | `uv run pipelines/preprocess.py` | `data/raw/` | `data/interim/`, `data/processed` |
+| `training` | `uv run pipelines/train.py --params pipelines/params.json` | `data/processed/` | `models/` |
+
+The **Model CT workflow** (`.github/workflows/model-ct.yml`) uses `dvc repro` to ensure the same
+pipeline runs in CI as locally. After each stage, DVC metadata (`data/raw.dvc`,
+`dvc.lock`) is committed back to git for audit trail and incremental re-runs.
+
+### Running Preprocessing (Manual CLI Invocation)
 Run sequentially over new updates:
 
 ```bash

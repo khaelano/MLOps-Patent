@@ -33,13 +33,10 @@ services:
       - patent-net
     restart: unless-stopped
 
-  # ── Inference server — Custom FastAPI app exposing performance metrics ────────
-  # Builds from docker/app/Dockerfile: lightweight Python 3.10 image with all
-  # dependencies. Exposes /health, /predict, and /metrics endpoints via FastAPI.
+  # ── Inference server — Pre-built self-contained image with model, baseline,
+  # and embedder baked in.  Exposes /health, /predict, and /metrics endpoints.
   inference-server:
-    build:
-      context: .
-      dockerfile: docker/app/Dockerfile
+    image: mlops-patent:latest
     expose:
       - "8000"
     deploy:
@@ -49,9 +46,18 @@ services:
       - MLFLOW_MODEL_NAME=${MLFLOW_MODEL_NAME:-patent-lshiforest}
       - EMBEDDER_SPEC=${EMBEDDER_SPEC:-embed-anything-onnx:AllMiniLML6V2Q}
       - DRIFT_SCORE_BUFFER_SIZE=10000
-      - HF_HOME=/app/.cache/huggingface
+      # HF_HOME intentionally not set — the ONNX embedder cache is baked
+      # into the image at the default HuggingFace cache path. No internet
+      # or volume persistence needed at runtime.
+      - PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - MLFLOW_S3_ENDPOINT_URL=${MLFLOW_S3_ENDPOINT_URL}
+      - GITHUB_DISPATCH_URL=https://api.github.com/repos/${GITHUB_REPO_OWNER}/${GITHUB_REPO_NAME}/dispatches
+      - GITHUB_DISPATCH_TOKEN=${GITHUB_DISPATCH_TOKEN}
+      - GITHUB_DISPATCH_EVENT=drift-detected
     volumes:
-      - embedder-cache:/app/.cache
+      - ./data:/app/data:ro,z
     depends_on:
       mlflow-server:
         condition: service_healthy
@@ -111,6 +117,9 @@ services:
       - GF_SECURITY_ADMIN_USER=${GRAFANA_ADMIN_USER:-admin}
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-admin}
       - GF_ALERTING_ENABLED=true
+      - GITHUB_REPO_OWNER=${GITHUB_REPO_OWNER:-}
+      - GITHUB_REPO_NAME=${GITHUB_REPO_NAME:-}
+      - GITHUB_DISPATCH_TOKEN=${GITHUB_DISPATCH_TOKEN:-}
     ports:
       - "${GRAFANA_PORT:-3000}:3000"
     volumes:
@@ -131,7 +140,6 @@ services:
     restart: unless-stopped
 
 volumes:
-  embedder-cache:
   prometheus-data:
   grafana-data:
 

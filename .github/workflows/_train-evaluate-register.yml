@@ -40,7 +40,11 @@ jobs:
 
       - uses: ./.github/actions/setup-python
 
-      - uses: ./.github/actions/dvc-pull
+      - name: Pull latest DVC metadata from upstream
+        shell: bash
+        run: git pull origin ${{ github.ref_name }}
+
+      - uses: ./.github/actions/pull-dvc
         with:
           aws-access-key-id: ${{ secrets.DVC_S3_ACCESS_KEY }}
           aws-secret-access-key: ${{ secrets.DVC_S3_SECRET_KEY }}
@@ -55,28 +59,20 @@ jobs:
           mlflow-db-uri: ${{ secrets.MLFLOW_DB_URI }}
           mlflow-s3-bucket: ${{ secrets.MLFLOW_S3_BUCKET }}
 
-      - name: Train and evaluate model
+      - name: Reproduce DVC training stage
         id: train
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.MLFLOW_S3_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.MLFLOW_S3_SECRET_KEY }}
           AWS_ENDPOINT_URL_S3: ${{ secrets.MLFLOW_S3_ENDPOINT }}
+          MLFLOW_EXPERIMENT_NAME: ${{ inputs.experiment-name || 'ci' }}
         run: |
-          EXPERIMENT="ci"
-          if [ -n "${{ inputs.experiment-name }}" ]; then
-            EXPERIMENT="${{ inputs.experiment-name }}"
-          elif [ -n "${{ inputs.pr-number }}" ]; then
-            EXPERIMENT="ci-pr-${{ inputs.pr-number }}"
-          fi
+          output=$(uv run dvc repro training 2>&1 | tee /dev/stderr)
 
-          output=$(uv run python patent/cli.py model train \
-            --mlflow-experiment "${EXPERIMENT}" \
-            2>&1 | tee /dev/stderr)
-
-          # Strip ANSI escape codes, then extract the 32-char hex run_id
+          # Strip ANSI escape codes, then extract run_id and pyfunc_version
           clean=$(echo "$output" | sed 's/\x1b\[[0-9;]*m//g')
-          run_id=$(echo "$clean" | grep -oP 'MLflow run ID: \K[a-f0-9]{32}')
-          pyfunc_version=$(echo "$clean" | grep -oP 'Pyfunc version: \K\d+')
+          run_id=$(echo "$clean" | grep -oP 'MLFLOW_RUN_ID=\K[a-f0-9]{32}')
+          pyfunc_version=$(echo "$clean" | grep -oP 'MLFLOW_PYFUNC_VERSION=\K\d+')
 
           if [ -z "$run_id" ]; then
             echo "ERROR: Could not extract MLflow run ID from output"
@@ -102,6 +98,13 @@ jobs:
             "${{ steps.train.outputs.run_id }}" \
             $pyfunc_arg \
             2>&1 | tee .register-output.log
+
+      - uses: ./.github/actions/update-dvc
+        with:
+          dvc-targets: ""
+          do-dvc-push: "false"
+          git-files: "dvc.lock"
+          message: "dvc: update pipeline lock after training [skip ci]"
 
       - uses: ./.github/actions/stop-mlflow
 

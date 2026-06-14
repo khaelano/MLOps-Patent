@@ -1,14 +1,6 @@
 """Data and prediction drift detection for the LSHiForest anomaly model.
 
-Two complementary drift signals are computed:
-
-1. **Score drift** — new anomaly scores are compared against baseline scores
-   using the two-sample KS test, Wasserstein distance, and mean-shift analysis.
-2. **Embedding drift** — new text embeddings are compared against baseline
-   embeddings via per-dimension mean shift in units of baseline standard
-   deviation.
-
-A baseline is captured at training time (or at the first drift check) and
+The drift baseline is captured at training time (or at the first drift check) and
 persisted to disk so that subsequent drift checks always compare against the
 same reference.
 """
@@ -16,6 +8,8 @@ same reference.
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 import time
 from typing import Any
 
@@ -26,7 +20,10 @@ from patent.config import INTERIM_DATA_DIR
 
 # ── Baseline storage paths ────────────────────────────────────────────────────
 
-BASELINE_DIR = INTERIM_DATA_DIR / "drift_baseline"
+_DRIFT_BASELINE_DIR = os.getenv("DRIFT_BASELINE_DIR")
+BASELINE_DIR = (
+    Path(_DRIFT_BASELINE_DIR) if _DRIFT_BASELINE_DIR else INTERIM_DATA_DIR / "drift_baseline"
+)
 EMBEDDING_BASELINE_PATH = BASELINE_DIR / "embedding_baseline.npz"
 SCORE_BASELINE_PATH = BASELINE_DIR / "score_baseline.npz"
 BASELINE_META_PATH = BASELINE_DIR / "baseline_meta.json"
@@ -68,57 +65,6 @@ class Baseline:
     @property
     def n_samples(self) -> int:
         return int(self.embeddings.shape[0])
-
-
-class DriftReport:
-    """Container for the results of a drift computation.
-
-    Attributes
-    ----------
-    drift_detected : bool
-        Whether drift was detected in the score distribution.
-    ks_statistic : float
-        Two-sample KS test statistic.
-    ks_pvalue : float
-        p-value of the KS test.
-    wasserstein_distance : float
-        Earth Mover's Distance between score distributions.
-    mean_shift : float
-        Absolute difference in mean anomaly scores.
-    mean_shift_relative : float
-        Mean shift normalised by baseline std deviation.
-    embedding_mean_shift : float
-        Average per-dimension absolute shift of embeddings (in baseline std units).
-    n_samples : int
-        Number of new samples in this check.
-    timestamp : float
-        Unix timestamp of the drift check.
-    """
-
-    def __init__(
-        self,
-        *,
-        drift_detected: bool = False,
-        drift_signals: list[str] | None = None,
-        ks_statistic: float = 0.0,
-        ks_pvalue: float = 1.0,
-        wasserstein_distance: float = 0.0,
-        mean_shift: float = 0.0,
-        mean_shift_relative: float = 0.0,
-        embedding_mean_shift: float = 0.0,
-        n_samples: int = 0,
-        timestamp: float | None = None,
-    ) -> None:
-        self.drift_detected = drift_detected
-        self.drift_signals = drift_signals or []
-        self.ks_statistic = ks_statistic
-        self.ks_pvalue = ks_pvalue
-        self.wasserstein_distance = wasserstein_distance
-        self.mean_shift = mean_shift
-        self.mean_shift_relative = mean_shift_relative
-        self.embedding_mean_shift = embedding_mean_shift
-        self.n_samples = n_samples
-        self.timestamp = timestamp or time.time()
 
 
 # ── Baseline persistence ──────────────────────────────────────────────────────
@@ -173,8 +119,13 @@ def save_drift_baseline(
     return baseline
 
 
-def load_drift_baseline() -> Baseline | None:
-    """Load a previously saved drift baseline or return ``None``."""
+def load_drift_baseline(model_version: str | None = None) -> Baseline | None:
+    """Load a previously saved drift baseline or return ``None``.
+
+    *model_version* is accepted for API compatibility with callers that pass
+    the current model version.  Currently ignored — the baseline is loaded
+    from the on-disk NPZ files regardless of version.
+    """
     if not EMBEDDING_BASELINE_PATH.exists() or not SCORE_BASELINE_PATH.exists():
         logger.info("No existing drift baseline found.")
         return None
@@ -211,85 +162,3 @@ def _load_baseline_meta() -> dict[str, Any]:
 
 
 # ── Drift computation ─────────────────────────────────────────────────────────
-
-
-def compute_drift_metrics(
-    new_embeddings: np.ndarray,
-    new_scores: np.ndarray,
-    baseline: Baseline | None = None,
-) -> DriftReport:
-    """Compute drift metrics between new data and the baseline.
-
-    When *baseline* is ``None`` (first run), the provided data becomes
-    the new baseline and no drift is detected.
-
-    Parameters
-    ----------
-    new_embeddings : ndarray of shape (n, d)
-        Float32 embeddings from the current batch of predictions.
-    new_scores : ndarray of shape (n,)
-        Float64 anomaly scores from the current batch.
-    baseline : Baseline | None
-        Previously saved baseline.  If ``None``, this call saves the
-        provided data as the new baseline.
-
-    Returns
-    -------
-    DriftReport
-    """
-    from patent.monitoring.drift_detector import detect_drift
-
-    n_samples = len(new_scores)
-
-    if baseline is None:
-        # First run — save as baseline, no drift
-        save_drift_baseline(new_embeddings, new_scores)
-        logger.info("Initial baseline captured — no drift check performed.")
-        return DriftReport(
-            drift_detected=False,
-            n_samples=n_samples,
-            embedding_mean_shift=0.0,
-        )
-
-    # ── Score drift ───────────────────────────────────────────────────────
-    drift_result = detect_drift(baseline.scores, new_scores)
-
-    # ── Embedding drift ───────────────────────────────────────────────────
-    emb_shift = _compute_embedding_mean_shift(baseline.embeddings, new_embeddings)
-
-    report = DriftReport(
-        drift_detected=drift_result["drift_detected"],
-        drift_signals=drift_result.get("drift_signals", []),
-        ks_statistic=drift_result["ks_statistic"],
-        ks_pvalue=drift_result["ks_pvalue"],
-        wasserstein_distance=drift_result["wasserstein_distance"],
-        mean_shift=drift_result["mean_shift"],
-        mean_shift_relative=drift_result["mean_shift_relative"],
-        embedding_mean_shift=emb_shift,
-        n_samples=n_samples,
-    )
-
-    if report.drift_detected:
-        logger.warning(
-            f"Drift detected: KS={report.ks_statistic:.4f} (p={report.ks_pvalue:.4f}), "
-            f"Wasserstein={report.wasserstein_distance:.4f}, "
-            f"emb_shift={report.embedding_mean_shift:.4f}"
-        )
-
-    return report
-
-
-def _compute_embedding_mean_shift(
-    baseline_embeddings: np.ndarray,
-    new_embeddings: np.ndarray,
-) -> float:
-    """Compute average per-dimension mean shift in baseline std units."""
-    base_mean = baseline_embeddings.mean(axis=0, dtype=np.float64)
-    base_std = baseline_embeddings.std(axis=0, dtype=np.float64)
-    new_mean = new_embeddings.mean(axis=0, dtype=np.float64)
-
-    # Avoid division by zero for constant dimensions
-    safe_std = np.where(base_std > 1e-8, base_std, 1.0)
-    per_dim_shift = np.abs(new_mean - base_mean) / safe_std
-
-    return float(np.mean(per_dim_shift))

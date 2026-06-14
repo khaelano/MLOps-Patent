@@ -96,12 +96,6 @@ data-embed: requirements
 	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make data-embed INPUT=<path>"; exit 1; fi
 	uv run $(PYTHON_INTERPRETER) patent/cli.py data embed $(INPUT)
 
-## Reduce embedding dimensionality via Temporal Incremental PCA
-.PHONY: data-reduce
-data-reduce: requirements
-	@if [ -z "$(INPUT)" ]; then echo "Error: INPUT is not set. Use make data-reduce INPUT=<path>"; exit 1; fi
-	uv run $(PYTHON_INTERPRETER) patent/cli.py data reduce $(INPUT)
-
 ## Train LSHiForest model on processed embeddings (default: data/processed/ -> models/)
 .PHONY: model-train
 model-train: requirements
@@ -112,20 +106,44 @@ model-train: requirements
 model-evaluate: requirements
 	uv run $(PYTHON_INTERPRETER) patent/cli.py model evaluate $(MODEL) $(DATA) $(OUTPUT)
 
-## Build Docker image from production MLflow model and push to GHCR
+## Download model + baseline from MLflow, then build self-contained image.
+## Requires .env with MLFLOW_TRACKING_URI and AWS credentials.
+## Override model: make docker-build MODEL_STAGE=Staging  or  MODEL_VERSION=5
 .PHONY: docker-build
 docker-build:
 	@test -f .env || { echo "Error: .env file not found."; exit 1; }
-	set -a && . ./.env && set +a && \
-		uv run mlflow models build-docker \
-			--model-uri "models:/$${MLFLOW_MODEL_NAME:-patent-lshiforest}/Production" \
-			--name "ghcr.io/khaelano/mlops-patent:latest" \
-			--env-manager local
+	$(eval MODEL_NAME ?= patent-lshiforest)
+	$(eval MODEL_STAGE ?= Production)
+	rm -rf model && mkdir model && \
+		export MLFLOW_TRACKING_URI=$$(grep '^MLFLOW_TRACKING_URI=' .env | head -1 | cut -d= -f2-) && \
+		export AWS_ACCESS_KEY_ID=$$(grep '^AWS_ACCESS_KEY_ID=' .env | head -1 | cut -d= -f2-) && \
+		export AWS_SECRET_ACCESS_KEY=$$(grep '^AWS_SECRET_ACCESS_KEY=' .env | head -1 | cut -d= -f2-) && \
+		export MLFLOW_S3_ENDPOINT_URL=$$(grep '^MLFLOW_S3_ENDPOINT_URL=' .env | head -1 | cut -d= -f2-) && \
+		if [ -n "$(MODEL_VERSION)" ]; then \
+			VERSION="$(MODEL_VERSION)"; \
+		else \
+			VERSION=$$(uv run python -c "from mlflow.tracking import MlflowClient; print(MlflowClient().get_latest_versions('$(MODEL_NAME)', stages=['$(MODEL_STAGE)'])[0].version)"); \
+		fi && \
+		echo "Downloading $(MODEL_NAME) v$$VERSION ..." && \
+		uv run python docker/app/download_model.py \
+			--model-name $(MODEL_NAME) \
+			--version $$VERSION \
+			--output-dir model && \
+		echo "Building image for $(MODEL_NAME) v$$VERSION ..." && \
+		docker build \
+			-f docker/app/Dockerfile \
+			--build-arg MODEL_SOURCE=./model \
+			-t "mlops-patent:model-v$$VERSION" \
+			-t "mlops-patent:latest" \
+			. && \
+		rm -rf model && \
+		echo "Built mlops-patent:model-v$$VERSION"
 
 ## Push the built Docker image to GHCR (requires `docker login ghcr.io`)
 .PHONY: docker-push
 docker-push:
 	docker push ghcr.io/khaelano/mlops-patent:latest
+	docker push ghcr.io/khaelano/mlops-patent:model-v$(MODEL_VERSION)
 
 ## Build and push: docker-build → docker-push
 .PHONY: docker-release

@@ -1,0 +1,23 @@
+# Grafana notification policy: route drift alerts to CT pipeline.
+#
+# Alerts labeled with ``drift_type: score_distribution`` are routed
+# to the ``github-ct-dispatch`` contact point, which sends a
+# repository_dispatch event to GitHub Actions to trigger the
+# continuous-training workflow.
+#
+# All other alerts fall through to the default email receiver.
+
+apiVersion: 1
+
+policies:
+  - orgId: 1
+    receiver: grafana-default-email
+    group_by:
+      - grafana_folder
+      - alertname
+    routes:
+      - receiver: github-ct-dispatch
+        object_matchers:
+          - - drift_type
+            - "="
+            - score_distribution

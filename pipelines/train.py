@@ -1,6 +1,6 @@
 import argparse
-from datetime import datetime
 import json
+import os
 from pathlib import Path
 
 from loguru import logger
@@ -29,11 +29,6 @@ def main():
         else:
             logger.warning(f"Provided params file {args.params} does not exist. Using defaults.")
 
-    run_timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    run_dir = MODELS_DIR / f"run_{run_timestamp}"
-    run_dir.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Created run directory: {run_dir}")
-
     parquet_files = list(PROCESSED_DATA_DIR.glob("*.parquet"))
     if not parquet_files:
         logger.error(f"No processed parquet files found in {PROCESSED_DATA_DIR}")
@@ -42,10 +37,16 @@ def main():
     parquet_files = sorted(parquet_files)
     logger.info(f"Targeting {len(parquet_files)} parquet file(s) for training.")
 
+    # ── MLflow context: env var overrides params.json ──────────────────
     mlflow_context = None
+    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME")
+
     if mlflow_params:
         mlflow_context = {}
-        if "experiment_name" in mlflow_params:
+        if experiment_name:
+            mlflow_context["experiment_name"] = experiment_name
+            mlflow.set_experiment(experiment_name)
+        elif "experiment_name" in mlflow_params:
             mlflow.set_experiment(mlflow_params["experiment_name"])
 
         for k in ["run_id", "experiment_id", "run_name", "description", "tags"]:
@@ -54,16 +55,25 @@ def main():
 
         if not mlflow_context:
             mlflow_context = None
+    elif experiment_name:
+        mlflow_context = {"experiment_name": experiment_name}
+        mlflow.set_experiment(experiment_name)
 
     logger.info("Initializing model training phase...")
-    train_model(
+    result = train_model(
         embeddings_dir=PROCESSED_DATA_DIR,
-        output_dir=run_dir,
+        output_dir=MODELS_DIR,
         model_params=model_params,
         mlflow_context=mlflow_context,
     )
 
-    logger.success(f"Training pipeline completed successfully. Artifacts saved in {run_dir}")
+    # ── Emit machine-readable output for CI / dvc repro to capture ──
+    if result.get("run_id"):
+        print(f"MLFLOW_RUN_ID={result['run_id']}")
+    if result.get("pyfunc_version"):
+        print(f"MLFLOW_PYFUNC_VERSION={result['pyfunc_version']}")
+
+    logger.success(f"Training pipeline completed. Artifacts saved in {MODELS_DIR}")
 
 
 if __name__ == "__main__":

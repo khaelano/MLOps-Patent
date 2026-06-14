@@ -42,6 +42,13 @@ build/
 # Documentation
 docs/_build/
 
+# Source code not needed in the inference image
+tests/
+notebooks/
+pipelines/
+scripts/
+.github/
+
 # Temporary files
 *.tmp
 *.log

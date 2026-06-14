@@ -37,31 +37,29 @@ Therefore, an anomaly detection-based novelty assessment method has emerged to e
 
 ### Pipeline
 
-The project follows a sequential data science pipeline. Each step is a Typer CLI app that can be run independently using `uv run`. For the data pipeline, use the `make` utility.
+The project uses a DVC pipeline (`dvc.yaml`) for reproducible data processing
+and model training. Each stage can also be run independently via the Typer CLI.
 
-1. **Process raw data (Integrated Data Pipeline)**
-   The integrated data pipeline will pull incremental arXiv text data and generate semantic SentenceTransformer numerical vectors natively:
+1. **Fetch raw data**
    ```bash
-   # Make update data starting from a specific date natively through Make:
-   make data-update FROM=2026-03-01 TO=2026-03-15
-
-   # Preprocess sequentially:
-   make data-reserialize INPUT=data/raw/updates/
-   make data-clean INPUT=data/interim/serialized/updates.parquet
-   make data-embed INPUT=data/interim/cleaned/updates.parquet
-   ```
-   *(For full details, see the architecture in [docs/data-pipeline.md](docs/docs/data-pipeline.md)).*
-
-2. **Reduce dimensions (Optional)**
-   Dramatically shrink the embedding vectors from 384d down to a computationally manageable size natively via iterative processing:
-   ```bash
-   make data-reduce INPUT=data/processed/updates.parquet
+   uv run python patent/cli.py data init          # Bootstrap from Kaggle
+   uv run python patent/cli.py data update        # Incremental arXiv updates
    ```
 
-3. **Train Model (LSHiForest)**
-   Dynamically build and train an LSHiForest (Locality-Sensitive Hashing isolation Forest) model over the semantic vectors. The pipeline natively tracks granular metrics (execution time, query latency, peak memory footprint, baseline C(n)) and serializes the memory-mapped artifacts (`.lshif`) using **MLflow**. Models, artifacts, and metrics are automatically tracked for robust life-cycle versioning.
+2. **Run the DVC pipeline** (recommended)
    ```bash
-   make model-tune INPUT=data/processed/updates.parquet
+   dvc repro                  # Run all stages (preprocess → training)
+   dvc repro preprocess       # reserialize → clean → embed only
+   dvc repro training         # train + evaluate only
+   ```
+   *(For full details, see [docs/data-pipeline.md](docs/docs/data-pipeline.md)).*
+
+3. **Or run individual CLI steps**
+   ```bash
+   uv run python patent/cli.py data reserialize data/raw/updates/
+   uv run python patent/cli.py data clean data/interim/serialized/updates.parquet
+   uv run python patent/cli.py data embed data/interim/cleaned/updates.parquet
+   uv run python patent/cli.py model train
    ```
 
  Use `--help` on any Typer CLI command (`uv run patent/cli.py <command> --help`) to see advanced invocation options.
@@ -71,17 +69,13 @@ The project follows a sequential data science pipeline. Each step is a Typer CLI
 | Command                  | Description                                |
 | ------------------------ | ------------------------------------------ |
 | `make requirements`      | Install/sync Python dependencies with uv   |
-| `make data-update FROM=YYYY-MM-DD` | Run incremental data ingestion |
-| `make data-reserialize INPUT=<path>`| Run XML/JSON DataFrame conversion |
-| `make data-clean INPUT=<path>`| Run text preprocessing logic |
-| `make data-embed INPUT=<path>`| Run sequence embedding logic |
-| `make data-reduce INPUT=<path>`| Run dimensionality reduction via PCA |
-| `make model-tune INPUT=<path>` | Train and serialize LSHiForest model via MLflow |
 | `make test`              | Run tests with pytest                      |
 | `make lint`              | Check code style with ruff                 |
 | `make format`            | Auto-format source code with ruff          |
+| `make typecheck`         | Run static type checking with ty           |
 | `make clean`             | Delete compiled Python files and caches    |
 | `make create_environment`| Create a new uv virtual environment        |
+| `make docker-build`      | Build production inference Docker image    |
 
 ### Docker Deployment
 
@@ -102,8 +96,10 @@ docker compose up -d
 | Service | Port | Replicas | Description |
 |---------|------|----------|-------------|
 | `mlflow-server` | 5000 | 1 | MLflow tracking server (UI + REST API) |
-| `inference-server` | — (internal) | 3 | LSHiForest model served via MLflow pyfunc |
+| `inference-server` | — (internal) | 3 | FastAPI inference with LSHiForest model |
 | `inference-lb` | 8000 | 1 | Nginx load balancer → inference-server replicas |
+| `prometheus` | 9090 | 1 | Metrics scraper (5s interval) |
+| `grafana` | 3000 | 1 | Dashboards + alerting for drift monitoring |
 
 #### Scaling replicas dynamically
 
@@ -124,39 +120,37 @@ so only the first replica downloads the model from HuggingFace.
 ### Inference API
 
 Once the stack is running, the inference server loads the latest **Production**
-model from the MLflow Model Registry (baked into the Docker image at build time).
+model from the MLflow Model Registry at startup.
 
 ```bash
-# Health check (model liveness)
-curl http://localhost:8000/ping
-# → 200 (empty body)
-
-# LB health check
+# Health check
 curl http://localhost:8000/health
-# → OK
+# → {"status":"ok","model_name":"patent-lshiforest","model_version":"5",...}
 
 # Score texts for anomaly
-curl -X POST http://localhost:8000/invocations \
+curl -X POST http://localhost:8000/predict \
   -H "Content-Type: application/json" \
-  -d '{
-    "dataframe_records": [
-      {"texts": "A novel approach to graph neural networks"},
-      {"texts": "Standard survey of existing NLP methods"}
-    ]
-  }'
-# → {"predictions":[
-#     {"scores":0.6448,"rescaled_scores":0.0},
-#     {"scores":0.6949,"rescaled_scores":1.0}
-#   ]}
+  -d '{"texts": ["A novel approach to graph neural networks", "Standard survey of existing NLP methods"]}'
+# → {"scores":[0.6448,0.6949],"rescaled_scores":[0.0,1.0],"model_version":"5"}
 ```
 
-For the full API reference (both request formats, Python example), see
+For the full API reference (all endpoints, Python example), see
 [docs/api.md](docs/api.md).
 
 | Field | Type | Range | Description |
 |---|---|---|---|
 | `scores` | float | [0, 1] | Raw LSHiForest anomaly score — higher = more anomalous |
 | `rescaled_scores` | float | [0, 1] | Percentile-rescaled for interpretability |
+| `model_version` | string | — | MLflow model version that produced the scores |
+
+### Monitoring
+
+The stack includes Prometheus and Grafana for drift monitoring:
+
+- **Prometheus** scrapes `/metrics` from the inference server every 5s
+- **Grafana** dashboard shows drift gauges, score distribution, throughput, and latency
+- **Grafana alert** fires when drift is sustained for 5 minutes, triggering the CT pipeline
+- See [docs/DRIFT_MONITORING.md](docs/DRIFT_MONITORING.md) for full details
 
 Configurable via `.env`:
 
@@ -185,6 +179,8 @@ Configurable via `.env`:
 ├── docs               <- MkDocs-based documentation
 │
 ├── models             <- Trained and serialized models, model predictions, or model summaries
+│
+├── pipelines          <- DVC pipeline stage entry points (preprocess.py, train.py)
 │
 ├── notebooks          <- Jupyter notebooks. Naming convention is a number (for ordering),
 │                         the creator's initials, and a short `-` delimited description, e.g.

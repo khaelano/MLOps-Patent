@@ -15,13 +15,18 @@ def detect_drift(
     ks_threshold: float = 0.05,
     wasserstein_threshold: float = 0.1,
     mean_shift_threshold: float = 0.05,
+    energy_threshold: float = 0.15,
 ) -> dict[str, Any]:
     """Detect whether *new_scores* have drifted relative to *baseline_scores*.
 
-    Three complementary tests are run:
+    Four complementary tests are run:
     1. **Two-sample KS test** — distribution-level shift (threshold on p-value).
     2. **Wasserstein (Earth Mover's) distance** — how much mass must move.
     3. **Mean shift** — simple first-moment comparison (normalised by baseline std).
+    4. **Energy distance** — distributional divergence sensitive to variance
+       and spread shifts the other three may miss.
+
+    Drift is flagged when ≥2 of the 4 tests agree.
 
     Parameters
     ----------
@@ -35,12 +40,14 @@ def detect_drift(
         Wasserstein distance threshold above which drift is flagged (default 0.1).
     mean_shift_threshold : float
         Mean-shift threshold in units of baseline std deviation (default 0.05).
+    energy_threshold : float
+        Energy distance threshold above which drift is flagged (default 0.15).
 
     Returns
     -------
     dict with keys: ``drift_detected`` (bool), ``ks_statistic``, ``ks_pvalue``,
     ``wasserstein_distance``, ``mean_shift``, ``mean_shift_relative``,
-    ``baseline_mean``, ``baseline_std``, ``new_mean``, ``new_std``.
+    ``energy_distance``, ``baseline_mean``, ``baseline_std``, ``new_mean``, ``new_std``.
     """
     # ── Keep only finite values ──────────────────────────────────────────
     base_finite = baseline_scores[np.isfinite(baseline_scores)]
@@ -56,6 +63,7 @@ def detect_drift(
             "ks_statistic": 0.0,
             "ks_pvalue": 1.0,
             "wasserstein_distance": 0.0,
+            "energy_distance": 0.0,
             "mean_shift": 0.0,
             "mean_shift_relative": 0.0,
             "baseline_mean": float(np.mean(base_finite)) if len(base_finite) > 0 else 0.0,
@@ -77,6 +85,9 @@ def detect_drift(
     # ── Wasserstein distance (Earth Mover's Distance) ────────────────────
     wasserstein_dist = float(stats.wasserstein_distance(base_finite, new_finite))
 
+    # ── Energy distance ─────────────────────────────────────────────────
+    energy_dist = float(stats.energy_distance(base_finite, new_finite))
+
     # ── Mean shift (absolute and relative) ───────────────────────────────
     mean_shift = new_mean - base_mean
     mean_shift_relative = abs(mean_shift) / base_std if base_std > 0 else 0.0
@@ -91,6 +102,8 @@ def detect_drift(
         )
     if mean_shift_relative > mean_shift_threshold:
         flags.append(f"Mean shift exceeded ({mean_shift_relative:.4f} > {mean_shift_threshold})")
+    if energy_dist > energy_threshold:
+        flags.append(f"Energy distance exceeded ({energy_dist:.4f} > {energy_threshold})")
 
     drift_detected = len(flags) >= 2  # require at least 2 signals to agree
 
@@ -99,7 +112,8 @@ def detect_drift(
     else:
         logger.info(
             f"No drift detected (KS p={ks_pvalue:.4f}, "
-            f"Wasserstein={wasserstein_dist:.4f}, mean_shift_rel={mean_shift_relative:.4f})"
+            f"Wasserstein={wasserstein_dist:.4f}, mean_shift_rel={mean_shift_relative:.4f}, "
+            f"energy_dist={energy_dist:.4f})"
         )
 
     return {
@@ -108,69 +122,11 @@ def detect_drift(
         "ks_statistic": ks_stat,
         "ks_pvalue": ks_pvalue,
         "wasserstein_distance": wasserstein_dist,
+        "energy_distance": energy_dist,
         "mean_shift": mean_shift,
         "mean_shift_relative": mean_shift_relative,
         "baseline_mean": base_mean,
         "baseline_std": base_std,
         "new_mean": new_mean,
         "new_std": new_std,
-    }
-
-
-def compare_score_distributions(
-    reference_scores: np.ndarray,
-    current_scores: np.ndarray,
-    bins: int = 20,
-) -> dict[str, Any]:
-    """Compare two score distributions and return summary statistics.
-
-    Useful for visualising how the score distribution has shifted between
-    two time windows.
-
-    Parameters
-    ----------
-    reference_scores : ndarray
-    current_scores : ndarray
-    bins : int
-        Number of histogram bins (default 20).
-
-    Returns
-    -------
-    dict with histogram data and summary statistics suitable for plotting.
-    """
-    ref_finite = reference_scores[np.isfinite(reference_scores)]
-    cur_finite = current_scores[np.isfinite(current_scores)]
-
-    if len(ref_finite) == 0 or len(cur_finite) == 0:
-        return {"error": "No finite scores in one or both arrays"}
-
-    # Shared bin edges
-    all_scores = np.concatenate([ref_finite, cur_finite])
-    bin_edges = np.linspace(all_scores.min(), all_scores.max(), bins + 1)
-
-    ref_hist, _ = np.histogram(ref_finite, bins=bin_edges)
-    cur_hist, _ = np.histogram(cur_finite, bins=bin_edges)
-
-    return {
-        "bin_edges": bin_edges.tolist(),
-        "reference_histogram": ref_hist.tolist(),
-        "current_histogram": cur_hist.tolist(),
-        "reference_summary": {
-            "n": len(ref_finite),
-            "mean": float(np.mean(ref_finite)),
-            "std": float(np.std(ref_finite)),
-            "min": float(np.min(ref_finite)),
-            "max": float(np.max(ref_finite)),
-            "median": float(np.median(ref_finite)),
-            "skewness": float(stats.skew(ref_finite)),
-        },
-        "current_summary": {
-            "n": len(cur_finite),
-            "mean": float(np.mean(cur_finite)),
-            "std": float(np.std(cur_finite)),
-            "min": float(np.min(cur_finite)),
-            "max": float(np.max(cur_finite)),
-            "median": float(np.median(cur_finite)),
-            "skewness": float(stats.skew(cur_finite)),
-        },
     }

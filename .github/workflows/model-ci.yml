@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
   packages: write
 
@@ -16,17 +16,74 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── PR only: train, evaluate, register, promote ──────────────────────────
+  # ── Always run tests ───────────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-python
+      - uses: ./.github/actions/run-tests
+
+  # ── Detect which paths changed ──────────────────────────────────────────
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      patent: ${{ steps.filter.outputs.patent }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            patent:
+              - 'patent/**'
+              - 'pyproject.toml'
+              - 'uv.lock'
+              - 'pipelines/**'
+              - 'dvc.yaml'
+
+  # ── Retrain only when model code changed ───────────────────────────────
   train-evaluate-register:
-    if: github.event_name == 'pull_request'
+    needs: [test, changes]
+    if: needs.changes.outputs.patent == 'true'
     uses: ./.github/workflows/_train-evaluate-register.yml
     secrets: inherit
     with:
-      pr-number: ${{ github.event.pull_request.number }}
+      experiment-name: "ci-code-change"
 
-  # ── PR comment (always runs after train-eval-reg, even on failure) ───────
+  # ── PR: dry-run Docker build (validates Dockerfile, no push) ───────────
+  build-pr:
+    needs: [test, changes, train-evaluate-register]
+    if: |
+      always() &&
+      github.event_name == 'pull_request' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    uses: ./.github/workflows/_docker-build-push.yml
+    secrets: inherit
+    with:
+      push: false
+
+  # ── Push to main: build and publish Docker image ───────────────────────
+  docker-release:
+    needs: [test, changes, train-evaluate-register]
+    if: |
+      always() &&
+      github.event_name == 'push' &&
+      !contains(needs.*.result, 'failure') &&
+      !contains(needs.*.result, 'cancelled')
+    uses: ./.github/workflows/_docker-build-push.yml
+    secrets: inherit
+    with:
+      push: true
+
+  # ── PR comment with training + build summary ───────────────────────────
   comment-pr:
-    needs: [train-evaluate-register]
+    needs: [train-evaluate-register, build-pr]
     if: always() && github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -50,16 +107,24 @@ jobs:
             let body = '## 🤖 Model CI Results\n\n';
 
             const trainResult = '${{ needs.train-evaluate-register.result }}';
+            const buildResult = '${{ needs.build-pr.result }}';
             const runId = '${{ needs.train-evaluate-register.outputs.run_id }}';
+            const codeChanged = '${{ needs.changes.outputs.patent }}';
 
-            if (runId && trainResult === 'success') {
-              body += `**MLflow Run**: \`${runId}\`\n`;
-            } else if (trainResult === 'failure') {
-              body += '**Status**: ❌ Training or evaluation failed\n\n';
+            // ── Training section ──
+            if (codeChanged === 'true') {
+              if (runId && trainResult === 'success') {
+                body += `**Training**: ✅ Retrained (code change) — MLflow run \`${runId}\`\n`;
+              } else if (trainResult === 'failure') {
+                body += '**Training**: ❌ Failed\n\n';
+              } else if (trainResult === 'skipped') {
+                body += '**Training**: ⏭️ Skipped\n';
+              }
             } else {
-              body += '**Status**: ⚠️ Training skipped or cancelled\n\n';
+              body += '**Training**: ⏭️ Skipped (no model code changes)\n';
             }
 
+            // ── Registry section ──
             let registerOutput = '';
             try {
               registerOutput = fs.readFileSync('.register-output.log', 'utf8');
@@ -87,6 +152,15 @@ jobs:
               }
             }
 
+            // ── Build section ──
+            if (buildResult === 'success') {
+              body += '**Docker build**: ✅ Passed\n';
+            } else if (buildResult === 'failure') {
+              body += '**Docker build**: ❌ Failed\n';
+            } else {
+              body += '**Docker build**: ⏭️ Skipped\n';
+            }
+
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -112,9 +186,3 @@ jobs:
                 body,
               });
             }
-
-  # ── Push to main only: build Docker image from Production model ──────────
-  docker-release:
-    if: github.event_name == 'push'
-    uses: ./.github/workflows/_docker-build-push.yml
-    secrets: inherit
